@@ -1,0 +1,31 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{db}/documents {
+    function me() { return get(/databases/$(db)/documents/users/$(request.auth.uid)).data; }
+    function inR(r) { return request.auth != null && exists(/databases/$(db)/documents/users/$(request.auth.uid)) && me().rid == r; }
+    function isOwner(r) { return inR(r) && me().role == 'owner'; }
+    function rest(r) { return get(/databases/$(db)/documents/restaurants/$(r)).data; }
+
+    match /users/{u} {
+      allow read: if request.auth != null && request.auth.uid == u;
+      allow create: if request.auth != null && request.auth.uid == u && (
+        (request.resource.data.role == 'owner' && rest(request.resource.data.rid).ownerUid == u) ||
+        (exists(/databases/$(db)/documents/codes/$(request.resource.data.code)) &&
+         get(/databases/$(db)/documents/codes/$(request.resource.data.code)).data.rid == request.resource.data.rid &&
+         get(/databases/$(db)/documents/codes/$(request.resource.data.code)).data.role == request.resource.data.role &&
+         request.resource.data.role in ['waiter', 'cashier']));
+    }
+    match /codes/{c} {
+      allow get: if request.auth != null;
+      allow create: if request.auth != null && rest(request.resource.data.rid).ownerUid == request.auth.uid;
+    }
+    match /restaurants/{r} {
+      allow create: if request.auth != null && request.resource.data.ownerUid == request.auth.uid;
+      allow read: if inR(r);
+      allow update, delete: if isOwner(r);
+      match /menu/{m} { allow read: if inR(r); allow write: if isOwner(r); }
+      match /orders/{o} { allow read, write: if inR(r); }
+      match /expenses/{e} { allow read, write: if isOwner(r); }
+    }
+  }
+}
