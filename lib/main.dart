@@ -500,7 +500,7 @@ class _OrderPageState extends State<OrderPage> {
           stream: c.col('menu').snapshots(),
           builder: (_, ms) {
             final open = os.data?.docs ?? [];
-            final menu = [...(ms.data?.docs ?? [])]
+            final List<QueryDocumentSnapshot<Map<String, dynamic>>> menu = [...(ms.data?.docs ?? [])]
               ..sort((a, b) => '${a['name']}'.toLowerCase().compareTo('${b['name']}'.toLowerCase()));
             final cur = open.isEmpty ? null : open.first.data();
             return Column(children: [
@@ -591,7 +591,7 @@ class BillsPage extends StatelessWidget {
   Widget build(BuildContext context) => StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
         stream: c.col('orders').where('status', isEqualTo: 'open').snapshots(),
         builder: (_, s) {
-          final docs = [...(s.data?.docs ?? [])]
+          final List<QueryDocumentSnapshot<Map<String, dynamic>>> docs = [...(s.data?.docs ?? [])]
             ..sort((a, b) => _n(a['table']).compareTo(_n(b['table'])));
           return Pg('Bills', [
             box([
@@ -663,7 +663,7 @@ class MenuPage extends StatelessWidget {
   Widget build(BuildContext context) => StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
         stream: c.col('menu').snapshots(),
         builder: (_, s) {
-          final docs = [...(s.data?.docs ?? [])]
+          final List<QueryDocumentSnapshot<Map<String, dynamic>>> docs = [...(s.data?.docs ?? [])]
             ..sort((a, b) => '${a['name']}'.toLowerCase().compareTo('${b['name']}'.toLowerCase()));
           return Pg('Menu', [
             box([
@@ -718,7 +718,7 @@ class _ReportPageState extends State<ReportPage> {
         stream: c.col('expenses').where('ts', isGreaterThanOrEqualTo: f).snapshots(),
         builder: (_, es) {
           final orders = os.data?.docs ?? [];
-          final exps = [...(es.data?.docs ?? [])]
+          final List<QueryDocumentSnapshot<Map<String, dynamic>>> exps = [...(es.data?.docs ?? [])]
             ..sort((a, b) => ((b['ts'] as Timestamp?)?.millisecondsSinceEpoch ?? 0)
                 .compareTo((a['ts'] as Timestamp?)?.millisecondsSinceEpoch ?? 0));
           final sales = orders.fold<num>(0, (a, d) => a + orderTotal(d.data()));
