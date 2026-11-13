@@ -435,19 +435,122 @@ class Root extends StatelessWidget {
           if (s.connectionState == ConnectionState.waiting) return const Splash();
           final u = s.data;
           if (u == null) return const AuthPage();
+          return Gate(key: ValueKey(u.uid), user: u);
+        },
+      );
+}
+
+/// Login pachi profile + restaurant load kare. Atki jay to connection restart kare ane sacho error batave.
+class Gate extends StatefulWidget {
+  final User user;
+  const Gate({required this.user, super.key});
+  @override
+  State<Gate> createState() => _GateState();
+}
+
+class _GateState extends State<Gate> {
+  Stream<DocumentSnapshot<Json>>? us, rs;
+  String? watching;
+  Timer? timer;
+  int attempt = 0;
+  bool ready = false, gaveUp = false;
+
+  @override
+  void initState() {
+    super.initState();
+    us = db.collection('users').doc(widget.user.uid).snapshots();
+    timer = Timer(const Duration(seconds: 5), onSlow);
+  }
+
+  @override
+  void dispose() {
+    timer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> restart({bool reconnect = false}) async {
+    timer?.cancel();
+    if (reconnect) {
+      try {
+        await db.disableNetwork();
+        await db.enableNetwork();
+      } catch (_) {}
+    }
+    if (!mounted) return;
+    setState(() {
+      us = db.collection('users').doc(widget.user.uid).snapshots();
+      rs = null;
+      watching = null;
+      ready = false;
+      gaveUp = false;
+    });
+    timer = Timer(const Duration(seconds: 5), onSlow);
+  }
+
+  Future<void> onSlow() async {
+    if (!mounted || ready) return;
+    attempt++;
+    if (attempt >= 3) {
+      setState(() => gaveUp = true);
+      return;
+    }
+    await restart(reconnect: true);
+  }
+
+  void manualRetry() {
+    attempt = 0;
+    restart(reconnect: true);
+  }
+
+  Widget wait(String label, {String? err}) {
+    final stuck = gaveUp || err != null;
+    return Scaffold(
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            if (!stuck) const CircularProgressIndicator(color: kBrand),
+            if (stuck) const Icon(Icons.wifi_off, size: 40, color: kMute),
+            const SizedBox(height: 20),
+            Text(
+                err != null
+                    ? 'Data load thayo nahi:\n$err'
+                    : gaveUp
+                        ? 'Server sathe connect thatu nathi.\nInternet check karo ane fari prayatn karo.'
+                        : label,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: kMute)),
+            if (stuck) ...[
+              const SizedBox(height: 16),
+              SizedBox(width: 220, child: FilledButton(onPressed: manualRetry, child: const Text('Fari prayatn karo'))),
+            ],
+            TextButton(onPressed: () => FirebaseAuth.instance.signOut(), child: const Text('Logout')),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => StreamBuilder<DocumentSnapshot<Json>>(
+        stream: us,
+        builder: (_, u) {
+          if (u.hasError) return wait('', err: '${u.error}');
+          if (!u.hasData || !u.data!.exists) return wait('Account taiyar thai rahyo che...');
+          final ud = u.data!.data()!;
+          final rid = ud['rid'] as String;
+          if (watching != rid) {
+            watching = rid;
+            rs = db.collection('restaurants').doc(rid).snapshots();
+          }
           return StreamBuilder<DocumentSnapshot<Json>>(
-            stream: db.collection('users').doc(u.uid).snapshots(),
-            builder: (_, us) {
-              if (!us.hasData || !us.data!.exists) return const Splash(logout: true);
-              final ud = us.data!.data()!;
-              return StreamBuilder<DocumentSnapshot<Json>>(
-                stream: db.collection('restaurants').doc(ud['rid'] as String).snapshots(),
-                builder: (_, rs) {
-                  if (!rs.hasData || !rs.data!.exists) return const Splash(logout: true);
-                  return Home(
-                      c: Ctx(ud['rid'] as String, ud['role'] as String, (ud['name'] ?? '') as String, rs.data!.data()!));
-                },
-              );
+            stream: rs,
+            builder: (_, r) {
+              if (r.hasError) return wait('', err: '${r.error}');
+              if (!r.hasData || !r.data!.exists) return wait('Restaurant load thai rahi che...');
+              ready = true;
+              timer?.cancel();
+              return Home(c: Ctx(rid, ud['role'] as String, (ud['name'] ?? '') as String, r.data!.data()!));
             },
           );
         },
