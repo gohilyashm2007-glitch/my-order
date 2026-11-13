@@ -172,6 +172,20 @@ Widget itemImg(String id, Json d, {double size = 52}) {
   );
 }
 
+String errText(Object? e) {
+  if (e is FirebaseException && e.code == 'permission-denied') {
+    return 'Permission nathi (restaurant band che, approve baki che ke email verify baki che)';
+  }
+  return '$e';
+}
+
+String fmtDate(dynamic ts) {
+  if (ts is! Timestamp) return '';
+  const mo = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  final d = ts.toDate();
+  return '${d.day} ${mo[d.month - 1]} ${d.year}';
+}
+
 // ---------------- UI kit ----------------
 class Surface extends StatelessWidget {
   final Widget child;
@@ -600,7 +614,7 @@ class Root extends StatelessWidget {
       );
 }
 
-/// Login pachi profile + restaurant load kare. Atki jay to connection restart kare ane sacho error batave.
+/// Login pachi: admin check -> email verify -> profile -> restaurant (approval) -> Home.
 class Gate extends StatefulWidget {
   final User user;
   const Gate({required this.user, super.key});
@@ -609,16 +623,21 @@ class Gate extends StatefulWidget {
 }
 
 class _GateState extends State<Gate> {
-  Stream<DocumentSnapshot<Json>>? us, rs;
+  Stream<DocumentSnapshot<Json>>? adm, us, rs;
   String? watching;
   Timer? timer;
   int attempt = 0;
   bool ready = false, gaveUp = false;
+  bool verified = FirebaseAuth.instance.currentUser?.emailVerified ?? false;
+
+  Stream<DocumentSnapshot<Json>> admStream() => db.collection('admins').doc(widget.user.uid).snapshots();
+  Stream<DocumentSnapshot<Json>> usStream() => db.collection('users').doc(widget.user.uid).snapshots();
 
   @override
   void initState() {
     super.initState();
-    us = db.collection('users').doc(widget.user.uid).snapshots();
+    adm = admStream();
+    us = usStream();
     timer = Timer(const Duration(seconds: 5), onSlow);
   }
 
@@ -638,7 +657,8 @@ class _GateState extends State<Gate> {
     }
     if (!mounted) return;
     setState(() {
-      us = db.collection('users').doc(widget.user.uid).snapshots();
+      adm = admStream();
+      us = usStream();
       rs = null;
       watching = null;
       ready = false;
@@ -693,27 +713,278 @@ class _GateState extends State<Gate> {
 
   @override
   Widget build(BuildContext context) => StreamBuilder<DocumentSnapshot<Json>>(
-        stream: us,
-        builder: (_, u) {
-          if (u.hasError) return wait('', err: '${u.error}');
-          if (!u.hasData || !u.data!.exists) return wait('Account taiyar thai rahyo che...');
-          final ud = u.data!.data()!;
-          final rid = ud['rid'] as String;
-          if (watching != rid) {
-            watching = rid;
-            rs = db.collection('restaurants').doc(rid).snapshots();
+        stream: adm,
+        builder: (_, a) {
+          if (a.hasError) return wait('', err: errText(a.error));
+          if (!a.hasData) return wait('Load thai rahyu che...');
+          if (a.data!.exists) {
+            ready = true;
+            timer?.cancel();
+            return const AdminPage();
+          }
+          if (!verified) {
+            ready = true;
+            timer?.cancel();
+            return VerifyPage(onVerified: () {
+              verified = true;
+              attempt = 0;
+              restart();
+            });
           }
           return StreamBuilder<DocumentSnapshot<Json>>(
-            stream: rs,
-            builder: (_, r) {
-              if (r.hasError) return wait('', err: '${r.error}');
-              if (!r.hasData || !r.data!.exists) return wait('Restaurant load thai rahi che...');
-              ready = true;
-              timer?.cancel();
-              return Home(c: Ctx(rid, ud['role'] as String, (ud['name'] ?? '') as String, r.data!.data()!));
+            stream: us,
+            builder: (_, u) {
+              if (u.hasError) return wait('', err: errText(u.error));
+              if (!u.hasData || !u.data!.exists) return wait('Account taiyar thai rahyo che...');
+              final ud = u.data!.data()!;
+              final rid = ud['rid'] as String;
+              if (watching != rid) {
+                watching = rid;
+                rs = db.collection('restaurants').doc(rid).snapshots();
+              }
+              return StreamBuilder<DocumentSnapshot<Json>>(
+                stream: rs,
+                builder: (_, r) {
+                  if (r.hasError) return wait('', err: errText(r.error));
+                  if (!r.hasData || !r.data!.exists) return wait('Restaurant load thai rahi che...');
+                  final rd = r.data!.data()!;
+                  ready = true;
+                  timer?.cancel();
+                  final st = '${rd['status'] ?? ''}';
+                  if (st != 'approved') return PendingPage(name: '${rd['name'] ?? ''}', status: st);
+                  return Home(c: Ctx(rid, ud['role'] as String, (ud['name'] ?? '') as String, rd));
+                },
+              );
             },
           );
         },
+      );
+}
+
+// ---------------- EMAIL VERIFY ----------------
+class VerifyPage extends StatefulWidget {
+  final VoidCallback onVerified;
+  const VerifyPage({required this.onVerified, super.key});
+  @override
+  State<VerifyPage> createState() => _VerifyPageState();
+}
+
+class _VerifyPageState extends State<VerifyPage> {
+  bool busy = false;
+  String? msg;
+  Timer? poll;
+
+  @override
+  void initState() {
+    super.initState();
+    poll = Timer.periodic(const Duration(seconds: 4), (_) => check(silent: true));
+  }
+
+  @override
+  void dispose() {
+    poll?.cancel();
+    super.dispose();
+  }
+
+  Future<void> check({bool silent = false}) async {
+    if (!silent && mounted) setState(() => busy = true);
+    try {
+      await FirebaseAuth.instance.currentUser?.reload();
+      final u = FirebaseAuth.instance.currentUser;
+      if (u != null && u.emailVerified) {
+        await u.getIdToken(true);
+        poll?.cancel();
+        widget.onVerified();
+        return;
+      }
+      if (!silent && mounted) setState(() => msg = 'Haji email verify thayo nathi. Email ma link par dabavo.');
+    } catch (e) {
+      if (!silent && mounted) setState(() => msg = 'Error: $e');
+    }
+    if (!silent && mounted) setState(() => busy = false);
+  }
+
+  Future<void> resend() async {
+    try {
+      await FirebaseAuth.instance.currentUser?.sendEmailVerification();
+      if (mounted) setState(() => msg = 'Verification email fari moklyo. Spam folder pan check karo.');
+    } on FirebaseAuthException catch (e) {
+      if (mounted) setState(() => msg = e.code == 'too-many-requests' ? 'Thodi var pachi fari try karo' : 'Error: ${e.code}');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final email = FirebaseAuth.instance.currentUser?.email ?? '';
+    return Scaffold(
+      body: SafeArea(
+        child: Center(
+          child: ListView(
+            shrinkWrap: true,
+            padding: const EdgeInsets.all(28),
+            children: [
+              Center(
+                child: Container(
+                  width: 72,
+                  height: 72,
+                  decoration: const BoxDecoration(color: kBrandSoft, shape: BoxShape.circle),
+                  child: const Icon(Icons.mark_email_unread_outlined, color: kBrand, size: 34),
+                ),
+              ),
+              const SizedBox(height: 22),
+              const Text('Email verify karo', textAlign: TextAlign.center, style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+              const SizedBox(height: 8),
+              Text('$email par verification link moklyo che.\nEmail ma link par dabavo, pachi ahiya pachha aavo. Spam folder pan check karo.',
+                  textAlign: TextAlign.center, style: const TextStyle(color: kMute, height: 1.4)),
+              if (msg != null)
+                Padding(padding: const EdgeInsets.only(top: 14), child: Text(msg!, textAlign: TextAlign.center, style: const TextStyle(color: kBrand, fontWeight: FontWeight.w600))),
+              const SizedBox(height: 24),
+              FilledButton(
+                  onPressed: busy ? null : () => check(),
+                  child: busy
+                      ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5, color: Colors.white))
+                      : const Text('Meiil verify karyu, aagal vadho')),
+              const SizedBox(height: 10),
+              OutlinedButton(
+                style: OutlinedButton.styleFrom(
+                    minimumSize: const Size.fromHeight(52),
+                    side: const BorderSide(color: kLine),
+                    backgroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))),
+                onPressed: resend,
+                child: const Text('Fari email moklo', style: TextStyle(fontWeight: FontWeight.w700)),
+              ),
+              TextButton(onPressed: () => FirebaseAuth.instance.signOut(), child: const Text('Logout', style: TextStyle(color: kMute))),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------- APPROVAL PENDING ----------------
+class PendingPage extends StatelessWidget {
+  final String name, status;
+  const PendingPage({required this.name, required this.status, super.key});
+  @override
+  Widget build(BuildContext context) {
+    final rej = status == 'rejected';
+    return Scaffold(
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Container(
+              width: 72,
+              height: 72,
+              decoration: const BoxDecoration(color: kBrandSoft, shape: BoxShape.circle),
+              child: Icon(rej ? Icons.block : Icons.hourglass_top, color: kBrand, size: 34),
+            ),
+            const SizedBox(height: 22),
+            Text(rej ? 'Approve thayu nathi' : 'Approval baki che', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 8),
+            Text(
+                rej
+                    ? '"$name" ne admin e approve karyu nathi. Madad mate admin no sampark karo.'
+                    : '"$name" admin approve kare tyare app potani jate chalu thase. Aa screen khuli rakhi shako.',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: kMute, height: 1.4)),
+            const SizedBox(height: 20),
+            TextButton(onPressed: () => FirebaseAuth.instance.signOut(), child: const Text('Logout')),
+          ]),
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------- ADMIN PANEL ----------------
+class AdminPage extends StatefulWidget {
+  const AdminPage({super.key});
+  @override
+  State<AdminPage> createState() => _AdminPageState();
+}
+
+class _AdminPageState extends State<AdminPage> {
+  int tab = 0;
+  static const keys = ['pending', 'approved', 'rejected'];
+
+  String stOf(Json d) {
+    final s = '${d['status'] ?? 'pending'}';
+    return keys.contains(s) ? s : 'pending';
+  }
+
+  Widget btn(String label, VoidCallback f, {Color color = kOk, bool outline = false}) => Expanded(
+        child: outline
+            ? OutlinedButton(
+                style: OutlinedButton.styleFrom(
+                    minimumSize: const Size.fromHeight(48),
+                    foregroundColor: color,
+                    side: BorderSide(color: color),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+                onPressed: f,
+                child: Text(label, style: const TextStyle(fontWeight: FontWeight.w700)))
+            : FilledButton(
+                style: FilledButton.styleFrom(backgroundColor: color, minimumSize: const Size.fromHeight(48)),
+                onPressed: f,
+                child: Text(label)),
+      );
+
+  Future<void> setStatus(QDoc d, String st) async {
+    await run(context, () => d.reference.update({'status': st}));
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        body: StreamBuilder<QuerySnapshot<Json>>(
+          stream: db.collection('restaurants').snapshots(),
+          builder: (_, s) {
+            if (s.hasError) {
+              return Center(child: Padding(padding: const EdgeInsets.all(24), child: Text('Error: ${errText(s.error)}', textAlign: TextAlign.center)));
+            }
+            final List<QDoc> all = [...(s.data?.docs ?? <QDoc>[])];
+            final counts = [for (final k in keys) all.where((d) => stOf(d.data()) == k).length];
+            final List<QDoc> list = all.where((d) => stOf(d.data()) == keys[tab]).toList()
+              ..sort((a, b) => ((b.data()['created'] as Timestamp?)?.millisecondsSinceEpoch ?? 0)
+                  .compareTo((a.data()['created'] as Timestamp?)?.millisecondsSinceEpoch ?? 0));
+            return Pg('Admin panel',
+                sub: 'Restaurant approval',
+                trailing: IconButton(onPressed: () => FirebaseAuth.instance.signOut(), icon: const Icon(Icons.logout, color: kMute)),
+                children: [
+                  Seg(
+                      items: ['Pending (${counts[0]})', 'Approved (${counts[1]})', 'Rejected (${counts[2]})'],
+                      index: tab,
+                      onChanged: (v) => setState(() => tab = v)),
+                  const SizedBox(height: 16),
+                  if (list.isEmpty) empty(Icons.verified_user_outlined, 'Aa list ma koi restaurant nathi'),
+                  for (final d in list)
+                    Surface(
+                      margin: const EdgeInsets.only(bottom: 12),
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Row(children: [
+                          Expanded(child: Text('${d['name']}', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800))),
+                          pill(keys[tab] == 'pending' ? 'Pending' : keys[tab] == 'approved' ? 'Approved' : 'Rejected',
+                              bg: keys[tab] == 'approved' ? kOkSoft : kBrandSoft, fg: keys[tab] == 'approved' ? kOk : kBrand),
+                        ]),
+                        const SizedBox(height: 6),
+                        Text('${d.data()['ownerName'] ?? ''}  ·  ${d.data()['ownerEmail'] ?? 'email nathi'}', style: const TextStyle(color: kMute)),
+                        Text('${d.data()['tables'] ?? 10} tables  ·  ${fmtDate(d.data()['created'])}', style: const TextStyle(color: kMute, fontSize: 13)),
+                        const SizedBox(height: 14),
+                        Row(children: [
+                          if (keys[tab] == 'pending') ...[
+                            btn('Reject', () => setStatus(d, 'rejected'), color: kBad, outline: true),
+                            const SizedBox(width: 10),
+                            btn('Approve', () => setStatus(d, 'approved')),
+                          ],
+                          if (keys[tab] == 'approved') btn('Band karo', () => setStatus(d, 'rejected'), color: kBad, outline: true),
+                          if (keys[tab] == 'rejected') btn('Fari chalu karo', () => setStatus(d, 'approved')),
+                        ]),
+                      ]),
+                    ),
+                ]);
+          },
+        ),
       );
 }
 
@@ -800,6 +1071,9 @@ class _AuthPageState extends State<AuthPage> {
               'name': rn.text.trim(),
               'ownerUid': uid,
               'tables': 10,
+              'status': 'pending',
+              'ownerName': nm.text.trim(),
+              'ownerEmail': email,
               'waiterCode': wc,
               'cashierCode': cc,
               'created': FieldValue.serverTimestamp(),
@@ -818,11 +1092,18 @@ class _AuthPageState extends State<AuthPage> {
               'name': nm.text.trim(),
             });
           }
+          try {
+            await cred.user!.sendEmailVerification();
+          } catch (_) {}
         } catch (e) {
           try {
             await cred.user?.delete();
           } catch (_) {}
-          authErr.value = e is String ? e : 'Setup thayu nahi: $e';
+          authErr.value = e is String
+              ? e
+              : (e is FirebaseException && e.code == 'permission-denied'
+                  ? (mode == 2 ? 'Code khoto che ke aa restaurant haji approve thai nathi' : 'Permission error. Firebase rules publish karya che?')
+                  : 'Setup thayu nahi: $e');
         }
       }
     } on FirebaseAuthException catch (e) {
