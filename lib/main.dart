@@ -117,6 +117,23 @@ Future<bool> run(BuildContext context, Future<void> Function() w, {String? queue
   }
 }
 
+const kOther = 'Bija';
+String secOf(Json d) {
+  final s = '${d['cat'] ?? ''}'.trim();
+  return s.isEmpty ? kOther : s;
+}
+
+List<String> sectionOrder(Ctx c, List<QDoc> menu) {
+  final out = <String>[...c.sections];
+  final extra = <String>{for (final m in menu) secOf(m.data())}
+      .where((x) => !out.contains(x) && x != kOther)
+      .toList()
+    ..sort();
+  out.addAll(extra);
+  if (menu.any((m) => secOf(m.data()) == kOther)) out.add(kOther);
+  return out;
+}
+
 // ---------------- UI kit ----------------
 class Surface extends StatelessWidget {
   final Widget child;
@@ -348,6 +365,7 @@ class Ctx {
   String get name => (r['name'] ?? '') as String;
   bool get owner => role == 'owner';
   String get roleLabel => {'owner': 'Owner', 'waiter': 'Order lenar', 'cashier': 'Bill counter'}[role] ?? role;
+  List<String> get sections => [for (final e in (r['sections'] ?? []) as List) '$e'];
 }
 
 class MyOrderApp extends StatelessWidget {
@@ -842,15 +860,11 @@ class _OrderPageState extends State<OrderPage> {
             final cur = (os.data != null && os.data!.exists) ? os.data!.data() : null;
             final List<QDoc> menu = [...(ms.data?.docs ?? <QDoc>[])]
               ..sort((a, b) => '${a['name']}'.toLowerCase().compareTo('${b['name']}'.toLowerCase()));
-            final cats = <String>{
-              for (final m in menu)
-                if ('${m.data()['cat'] ?? ''}'.isNotEmpty) '${m.data()['cat']}'
-            }.toList()
-              ..sort();
+            final order = sectionOrder(c, menu);
+            final cats = order.where((x) => menu.any((m) => secOf(m.data()) == x)).toList();
             final shown = menu.where((m) {
               final d = m.data();
-              return (cat.isEmpty || '${d['cat'] ?? ''}' == cat) &&
-                  '${d['name']}'.toLowerCase().contains(q.toLowerCase());
+              return (cat.isEmpty || secOf(d) == cat) && '${d['name']}'.toLowerCase().contains(q.toLowerCase());
             }).toList();
             var count = 0;
             num total = 0;
@@ -908,26 +922,37 @@ class _OrderPageState extends State<OrderPage> {
                     sectionTitle('Item umero'),
                     if (menu.isEmpty) empty(Icons.restaurant_menu, 'Menu khali che.\nOwner e Menu ma item umeravo.'),
                     if (menu.isNotEmpty && shown.isEmpty) empty(Icons.search, 'Koi item malyo nahi'),
-                    for (final m in shown)
-                      Surface(
-                        margin: const EdgeInsets.only(bottom: 10),
-                        padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
-                        child: Row(children: [
-                          Expanded(
-                            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                              Text('${m['name']}',
-                                  maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-                              const SizedBox(height: 2),
-                              Text(rs(_n(m['price'])), style: const TextStyle(color: kMute)),
+                    for (final sec in order)
+                      if (shown.any((m) => secOf(m.data()) == sec)) ...[
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(2, 10, 0, 10),
+                          child: Row(children: [
+                            Text(sec, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+                            const SizedBox(width: 8),
+                            pill('${shown.where((m) => secOf(m.data()) == sec).length}'),
+                          ]),
+                        ),
+                        for (final m in shown.where((m) => secOf(m.data()) == sec))
+                          Surface(
+                            margin: const EdgeInsets.only(bottom: 10),
+                            padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+                            child: Row(children: [
+                              Expanded(
+                                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                  Text('${m['name']}',
+                                      maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                                  const SizedBox(height: 2),
+                                  Text(rs(_n(m['price'])), style: const TextStyle(color: kMute)),
+                                ]),
+                              ),
+                              Qty(
+                                v: qty[m.id] ?? 0,
+                                onAdd: () => setState(() => qty[m.id] = (qty[m.id] ?? 0) + 1),
+                                onSub: () => setState(() => qty[m.id] = max(0, (qty[m.id] ?? 0) - 1)),
+                              ),
                             ]),
                           ),
-                          Qty(
-                            v: qty[m.id] ?? 0,
-                            onAdd: () => setState(() => qty[m.id] = (qty[m.id] ?? 0) + 1),
-                            onSub: () => setState(() => qty[m.id] = max(0, (qty[m.id] ?? 0) - 1)),
-                          ),
-                        ]),
-                      ),
+                      ],
                   ],
                 ),
               ),
@@ -1104,19 +1129,146 @@ class MenuPage extends StatelessWidget {
   final Ctx c;
   const MenuPage({required this.c, super.key});
 
-  Future<void> edit(BuildContext context, QDoc? d) async {
-    final m = d?.data();
-    final r = await askForm(context, d == null ? 'Navo item' : 'Item badlo', ['Naam', 'Category (jem ke Starter)', 'Price (₹)', 'Cost / kharch (₹)'],
-        init: m == null ? null : ['${m['name']}', '${m['cat'] ?? ''}', '${m['price']}', '${m['cost'] ?? 0}'], numeric: {2, 3});
-    if (r == null || r[0].isEmpty || !context.mounted) return;
-    final price = double.tryParse(r[2]) ?? 0;
-    if (price <= 0) {
-      toast(context, 'Price nakho', err: true);
+  DocumentReference<Json> get rest => db.collection('restaurants').doc(c.rid);
+
+  Future<void> addSection(BuildContext context) async {
+    final v = await askForm(context, 'Navo section', ['Section nu naam (jem ke Chinese)']);
+    if (v == null || v[0].isEmpty || !context.mounted) return;
+    final name = v[0];
+    if (c.sections.any((s) => s.toLowerCase() == name.toLowerCase())) {
+      toast(context, 'Aa section pehla thi che', err: true);
       return;
     }
-    final data = {'name': r[0], 'cat': r[1], 'price': price, 'cost': double.tryParse(r[3]) ?? 0};
+    await run(context, () => rest.update({'sections': FieldValue.arrayUnion([name])}));
+  }
+
+  Future<void> addSuggested(BuildContext context) async {
+    const names = ['Starter', 'Punjabi', 'South Indian', 'Chinese', 'Dessert', 'Drinks'];
+    await run(context, () => rest.update({'sections': FieldValue.arrayUnion(names)}));
+  }
+
+  Future<void> renameSection(BuildContext context, String old) async {
+    final v = await askForm(context, 'Section badlo', ['Naam'], init: [old]);
+    if (v == null || v[0].isEmpty || v[0] == old || !context.mounted) return;
+    final name = v[0];
+    if (c.sections.any((s) => s != old && s.toLowerCase() == name.toLowerCase())) {
+      toast(context, 'Aa naam nu section pehla thi che', err: true);
+      return;
+    }
+    await run(context, () async {
+      final qs = await c.col('menu').where('cat', isEqualTo: old).get();
+      final b = db.batch();
+      for (final d in qs.docs) {
+        b.update(d.reference, {'cat': name});
+      }
+      b.update(rest, {
+        'sections': [for (final s in c.sections) s == old ? name : s]
+      });
+      await b.commit();
+    });
+  }
+
+  Future<void> deleteSection(BuildContext context, String name) async {
+    final yes = await confirm(context, '"$name" section delete karvu?\nItems delete nahi thay, "$kOther" ma jase.', yes: 'Delete');
+    if (!yes || !context.mounted) return;
+    await run(context, () async {
+      final qs = await c.col('menu').where('cat', isEqualTo: name).get();
+      final b = db.batch();
+      for (final d in qs.docs) {
+        b.update(d.reference, {'cat': ''});
+      }
+      b.update(rest, {
+        'sections': [for (final s in c.sections) if (s != name) s]
+      });
+      await b.commit();
+    });
+  }
+
+  Future<void> editItem(BuildContext context, QDoc? d) async {
+    final m = d?.data();
+    final nm = TextEditingController(text: '${m?['name'] ?? ''}');
+    final pr = TextEditingController(text: m == null ? '' : '${m['price']}');
+    final co = TextEditingController(text: m == null ? '' : '${m['cost'] ?? 0}');
+    var sec = '${m?['cat'] ?? ''}';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dc) => StatefulBuilder(
+        builder: (sc, setS) => AlertDialog(
+          backgroundColor: Colors.white,
+          surfaceTintColor: Colors.transparent,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: Text(d == null ? 'Navo item' : 'Item badlo', style: const TextStyle(fontWeight: FontWeight.w800)),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              TextField(controller: nm, decoration: const InputDecoration(labelText: 'Item nu naam')),
+              const SizedBox(height: 10),
+              TextField(
+                  controller: pr,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(labelText: 'Price (₹)')),
+              const SizedBox(height: 10),
+              TextField(
+                  controller: co,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(labelText: 'Cost / kharch (₹)')),
+              const SizedBox(height: 16),
+              const Text('Section', style: TextStyle(fontWeight: FontWeight.w700)),
+              const SizedBox(height: 8),
+              if (c.sections.isEmpty)
+                const Text('Pehla Menu ma upar thi section umero (optional).', style: TextStyle(color: kMute, fontSize: 13)),
+              Wrap(spacing: 8, runSpacing: 8, children: [
+                for (final s in c.sections)
+                  GestureDetector(
+                    onTap: () => setS(() => sec = sec == s ? '' : s),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                      decoration: BoxDecoration(
+                          color: sec == s ? kBrand : Colors.white,
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(color: sec == s ? kBrand : kLine)),
+                      child: Text(s,
+                          style: TextStyle(color: sec == s ? Colors.white : kInk, fontWeight: FontWeight.w600, fontSize: 13)),
+                    ),
+                  ),
+              ]),
+            ]),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(dc, false), child: const Text('Cancel', style: TextStyle(color: kMute))),
+            FilledButton(
+                style: FilledButton.styleFrom(minimumSize: const Size(96, 44)),
+                onPressed: () => Navigator.pop(dc, true),
+                child: const Text('Save')),
+          ],
+        ),
+      ),
+    );
+    if (ok != true || !context.mounted) return;
+    final name = nm.text.trim();
+    final price = double.tryParse(pr.text.trim()) ?? 0;
+    if (name.isEmpty || price <= 0) {
+      toast(context, 'Item nu naam ane price nakho', err: true);
+      return;
+    }
+    final data = {'name': name, 'cat': sec, 'price': price, 'cost': double.tryParse(co.text.trim()) ?? 0};
     await run(context, () => d == null ? c.col('menu').add(data) : d.reference.update(data));
   }
+
+  Widget secChip(BuildContext context, String s) => Container(
+        padding: const EdgeInsets.fromLTRB(14, 4, 4, 4),
+        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), border: Border.all(color: kLine)),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          GestureDetector(
+              onTap: () => renameSection(context, s),
+              child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Text(s, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5)))),
+          GestureDetector(
+            onTap: () => deleteSection(context, s),
+            child: const Padding(padding: EdgeInsets.all(6), child: Icon(Icons.close, size: 16, color: kMute)),
+          ),
+        ]),
+      );
 
   @override
   Widget build(BuildContext context) => StreamBuilder<QuerySnapshot<Json>>(
@@ -1124,38 +1276,74 @@ class MenuPage extends StatelessWidget {
         builder: (_, s) {
           final List<QDoc> docs = [...(s.data?.docs ?? <QDoc>[])]
             ..sort((a, b) => '${a['name']}'.toLowerCase().compareTo('${b['name']}'.toLowerCase()));
-          return Pg('Menu', sub: '${docs.length} item', children: [
-            FilledButton.icon(onPressed: () => edit(context, null), icon: const Icon(Icons.add), label: const Text('Navo item')),
-            const SizedBox(height: 16),
+          final order = sectionOrder(c, docs);
+          return Pg('Menu', sub: '${docs.length} item  ·  ${c.sections.length} section', children: [
+            Surface(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Text('Sections', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16)),
+                const SizedBox(height: 2),
+                const Text('Jem ke Chinese, South Indian, Starter. Naam par dabavo to badlay, ✕ thi delete.',
+                    style: TextStyle(color: kMute, fontSize: 13)),
+                const SizedBox(height: 12),
+                Wrap(spacing: 8, runSpacing: 8, children: [
+                  for (final sec in c.sections) secChip(context, sec),
+                  GestureDetector(
+                    onTap: () => addSection(context),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      decoration: BoxDecoration(color: kBrandSoft, borderRadius: BorderRadius.circular(20)),
+                      child: const Text('+ Navu section', style: TextStyle(color: kBrand, fontWeight: FontWeight.w700, fontSize: 13.5)),
+                    ),
+                  ),
+                ]),
+                if (c.sections.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: TextButton(
+                        onPressed: () => addSuggested(context),
+                        child: const Text('Sujhaaveli sections umero (Starter, Punjabi, South Indian, Chinese, Dessert, Drinks)')),
+                  ),
+              ]),
+            ),
+            const SizedBox(height: 14),
+            FilledButton.icon(onPressed: () => editItem(context, null), icon: const Icon(Icons.add), label: const Text('Navo item')),
+            const SizedBox(height: 4),
             if (docs.isEmpty) empty(Icons.restaurant_menu, 'Menu khali che.\nPehlo item umero.'),
-            for (final d in docs)
-              Surface(
-                margin: const EdgeInsets.only(bottom: 10),
-                padding: const EdgeInsets.fromLTRB(16, 12, 6, 12),
-                onTap: () => edit(context, d),
-                child: Row(children: [
-                  Expanded(
-                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Row(children: [
-                        Flexible(
-                            child: Text('${d['name']}',
-                                maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700))),
-                        if ('${d.data()['cat'] ?? ''}'.isNotEmpty) ...[const SizedBox(width: 8), pill('${d.data()['cat']}')],
-                      ]),
-                      const SizedBox(height: 4),
-                      Text('Price ${rs(_n(d['price']))}   ·   Cost ${rs(_n(d.data()['cost'] ?? 0))}',
-                          style: const TextStyle(color: kMute, fontSize: 13)),
+            for (final sec in order)
+              ...[
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(2, 18, 0, 10),
+                  child: Row(children: [
+                    Text(sec, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+                    const SizedBox(width: 8),
+                    pill('${docs.where((m) => secOf(m.data()) == sec).length}'),
+                  ]),
+                ),
+                for (final d in docs.where((m) => secOf(m.data()) == sec))
+                  Surface(
+                    margin: const EdgeInsets.only(bottom: 10),
+                    padding: const EdgeInsets.fromLTRB(16, 12, 6, 12),
+                    onTap: () => editItem(context, d),
+                    child: Row(children: [
+                      Expanded(
+                        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Text('${d['name']}',
+                              maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                          const SizedBox(height: 4),
+                          Text('Price ${rs(_n(d['price']))}   ·   Cost ${rs(_n(d.data()['cost'] ?? 0))}',
+                              style: const TextStyle(color: kMute, fontSize: 13)),
+                        ]),
+                      ),
+                      IconButton(
+                          onPressed: () async {
+                            if (await confirm(context, '${d['name']} delete karvo?', yes: 'Delete')) {
+                              if (context.mounted) await run(context, () => d.reference.delete());
+                            }
+                          },
+                          icon: const Icon(Icons.delete_outline, color: kBad)),
                     ]),
                   ),
-                  IconButton(
-                      onPressed: () async {
-                        if (await confirm(context, '${d['name']} delete karvo?', yes: 'Delete')) {
-                          if (context.mounted) await run(context, () => d.reference.delete());
-                        }
-                      },
-                      icon: const Icon(Icons.delete_outline, color: kBad)),
-                ]),
-              ),
+              ],
           ]);
         },
       );
