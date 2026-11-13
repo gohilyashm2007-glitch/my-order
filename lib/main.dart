@@ -1,11 +1,15 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:ui' as ui;
 import 'dart:math';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:share_plus/share_plus.dart';
 
 typedef Json = Map<String, dynamic>;
 typedef QDoc = QueryDocumentSnapshot<Map<String, dynamic>>;
@@ -94,12 +98,14 @@ String billText(String shop, Json o) {
   return b.toString();
 }
 
-void toast(BuildContext c, String m, {bool err = false}) {
+void toast(BuildContext c, String m, {bool err = false, String? action, VoidCallback? onAction}) {
   ScaffoldMessenger.of(c).showSnackBar(SnackBar(
     content: Text(m),
     behavior: SnackBarBehavior.floating,
+    duration: Duration(seconds: action == null ? 4 : 9),
     backgroundColor: err ? kBad : kInk,
     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+    action: action == null ? null : SnackBarAction(label: action, textColor: Colors.white, onPressed: onAction ?? () {}),
   ));
 }
 
@@ -354,6 +360,128 @@ Future<bool> confirm(BuildContext context, String msg, {String yes = 'Ha'}) asyn
               ],
             ))) ??
     false;
+
+// ---------------- BILL IMAGE ----------------
+class BillCard extends StatelessWidget {
+  final String shop;
+  final Json o;
+  final String? pay;
+  const BillCard({required this.shop, required this.o, this.pay, super.key});
+
+  String when() {
+    const mo = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    final d = DateTime.now();
+    final h = d.hour % 12 == 0 ? 12 : d.hour % 12;
+    final m = d.minute.toString().padLeft(2, '0');
+    return '${d.day} ${mo[d.month - 1]} ${d.year}, $h:$m ${d.hour >= 12 ? 'PM' : 'AM'}';
+  }
+
+  Widget dash() => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Row(children: [
+          for (var i = 0; i < 32; i++)
+            Expanded(child: Container(height: 1, margin: const EdgeInsets.symmetric(horizontal: 2), color: const Color(0xFFD1D5DB))),
+        ]),
+      );
+
+  Widget cols(String a, String b, String c, String d, {bool head = false}) {
+    final st = TextStyle(fontSize: 13, fontWeight: head ? FontWeight.w700 : FontWeight.w500, color: head ? kMute : kInk);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(children: [
+        Expanded(flex: 5, child: Text(a, style: st)),
+        SizedBox(width: 28, child: Text(b, textAlign: TextAlign.center, style: st)),
+        SizedBox(width: 58, child: Text(c, textAlign: TextAlign.right, style: st)),
+        SizedBox(width: 68, child: Text(d, textAlign: TextAlign.right, style: st)),
+      ]),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final items = grouped(o);
+    return Container(
+      width: 340,
+      color: Colors.white,
+      padding: const EdgeInsets.fromLTRB(22, 26, 22, 24),
+      child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Center(
+          child: Container(
+            width: 46,
+            height: 46,
+            decoration: BoxDecoration(color: kBrand, borderRadius: BorderRadius.circular(14)),
+            child: const Icon(Icons.restaurant, color: Colors.white, size: 26),
+          ),
+        ),
+        const SizedBox(height: 10),
+        Text(shop, textAlign: TextAlign.center, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
+        const SizedBox(height: 2),
+        Text('Table ${o['table']}  ·  ${when()}', textAlign: TextAlign.center, style: const TextStyle(color: kMute, fontSize: 12.5)),
+        dash(),
+        cols('Item', 'Qty', 'Rate', 'Rakam', head: true),
+        for (final g in items) cols('${g['n']}', '${_n(g['q']).toInt()}', rs(_n(g['p'])), rs(_n(g['p']) * _n(g['q']))),
+        dash(),
+        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+          const Text('Total', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+          Text(rs(orderTotal(o)), style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w800, color: kBrand)),
+        ]),
+        if (pay != null) ...[
+          const SizedBox(height: 10),
+          Center(child: pill('Paid  ·  $pay', bg: kOkSoft, fg: kOk)),
+        ],
+        dash(),
+        const Text('Aabhar! Fari padharjo.', textAlign: TextAlign.center, style: TextStyle(color: kMute, fontSize: 13)),
+      ]),
+    );
+  }
+}
+
+Future<void> shareBill(BuildContext context, GlobalKey key, Json o) async {
+  try {
+    final boundary = key.currentContext!.findRenderObject() as RenderRepaintBoundary;
+    final img = await boundary.toImage(pixelRatio: 3);
+    final bd = await img.toByteData(format: ui.ImageByteFormat.png);
+    final f = File('${Directory.systemTemp.path}/bill_table_${o['table']}_${DateTime.now().millisecondsSinceEpoch}.png');
+    await f.writeAsBytes(bd!.buffer.asUint8List());
+    await Share.shareXFiles([XFile(f.path, mimeType: 'image/png')], text: 'Tamaru bill');
+  } catch (e) {
+    if (context.mounted) toast(context, 'Bill image banavva ma error: $e', err: true);
+  }
+}
+
+Future<void> showBill(BuildContext context, String shop, Json o, {String? pay}) {
+  final key = GlobalKey();
+  return showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: kBg,
+    shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+    builder: (b) => SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Flexible(
+            child: SingleChildScrollView(
+              child: Center(
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: RepaintBoundary(key: key, child: BillCard(shop: shop, o: o, pay: pay)),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 14),
+          FilledButton.icon(
+            style: FilledButton.styleFrom(backgroundColor: const Color(0xFF25D366)),
+            onPressed: () => shareBill(b, key, o),
+            icon: const Icon(Icons.share),
+            label: const Text('WhatsApp par moklo'),
+          ),
+        ]),
+      ),
+    ),
+  );
+}
 
 // ---------------- app / session ----------------
 class Ctx {
@@ -1151,7 +1279,11 @@ class BillsPage extends StatelessWidget {
     });
     batch.delete(d.reference);
     final ok = await run(context, () => batch.commit(), queued: 'Bill close thayu (offline). Internet aave tyare sync thase');
-    if (ok && context.mounted) toast(context, 'Table ${o['table']} nu bill ${rs(orderTotal(o))} ($mode) close thayu');
+    if (ok && context.mounted) {
+      final paidO = <String, dynamic>{...o, 'pay': mode};
+      toast(context, 'Table ${o['table']} nu bill ${rs(orderTotal(o))} ($mode) close thayu',
+          action: 'Bill moklo', onAction: () => showBill(context, c.name, paidO, pay: mode));
+    }
   }
 
   @override
@@ -1205,11 +1337,8 @@ class BillsPage extends StatelessWidget {
                             padding: EdgeInsets.zero,
                             side: const BorderSide(color: kLine),
                             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))),
-                        onPressed: () {
-                          Clipboard.setData(ClipboardData(text: billText(c.name, d.data())));
-                          toast(context, 'Bill copy thayu. WhatsApp ma paste karo.');
-                        },
-                        child: const Icon(Icons.content_copy, size: 20, color: kInk),
+                        onPressed: () => showBill(context, c.name, d.data()),
+                        child: const Icon(Icons.share, size: 20, color: kInk),
                       ),
                     ),
                     const SizedBox(width: 10),
