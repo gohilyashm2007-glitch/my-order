@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 import 'dart:io';
 import 'dart:ui' as ui;
 import 'dart:math';
@@ -9,6 +11,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:share_plus/share_plus.dart';
 
 typedef Json = Map<String, dynamic>;
@@ -138,6 +141,35 @@ List<String> sectionOrder(Ctx c, List<QDoc> menu) {
   out.addAll(extra);
   if (menu.any((m) => secOf(m.data()) == kOther)) out.add(kOther);
   return out;
+}
+
+final _imgCache = <String, Uint8List>{};
+Widget itemImg(String id, Json d, {double size = 52}) {
+  final s = '${d['img'] ?? ''}';
+  final ph = Container(
+    width: size,
+    height: size,
+    decoration: BoxDecoration(color: kBrandSoft, borderRadius: BorderRadius.circular(12)),
+    child: Icon(Icons.restaurant_menu, color: kBrand, size: size * 0.45),
+  );
+  if (s.isEmpty) return ph;
+  final key = '${id}_${s.length}';
+  Uint8List b;
+  final cached = _imgCache[key];
+  if (cached != null) {
+    b = cached;
+  } else {
+    try {
+      b = base64Decode(s);
+    } catch (_) {
+      return ph;
+    }
+    _imgCache[key] = b;
+  }
+  return ClipRRect(
+    borderRadius: BorderRadius.circular(12),
+    child: Image.memory(b, width: size, height: size, fit: BoxFit.cover, gaplessPlayback: true),
+  );
 }
 
 // ---------------- UI kit ----------------
@@ -1166,8 +1198,10 @@ class _OrderPageState extends State<OrderPage> {
                         for (final m in shown.where((m) => secOf(m.data()) == sec))
                           Surface(
                             margin: const EdgeInsets.only(bottom: 10),
-                            padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+                            padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
                             child: Row(children: [
+                              itemImg(m.id, m.data(), size: 56),
+                              const SizedBox(width: 12),
                               Expanded(
                                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                                   Text('${m['name']}',
@@ -1422,6 +1456,7 @@ class MenuPage extends StatelessWidget {
     final pr = TextEditingController(text: m == null ? '' : '${m['price']}');
     final co = TextEditingController(text: m == null ? '' : '${m['cost'] ?? 0}');
     var sec = '${m?['cat'] ?? ''}';
+    var img = '${m?['img'] ?? ''}';
     final ok = await showDialog<bool>(
       context: context,
       builder: (dc) => StatefulBuilder(
@@ -1432,6 +1467,39 @@ class MenuPage extends StatelessWidget {
           title: Text(d == null ? 'Navo item' : 'Item badlo', style: const TextStyle(fontWeight: FontWeight.w800)),
           content: SingleChildScrollView(
             child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Center(child: itemImg(d?.id ?? 'new', {'img': img}, size: 88)),
+              const SizedBox(height: 10),
+              Wrap(alignment: WrapAlignment.center, spacing: 8, runSpacing: 8, children: [
+                for (final src in [ImageSource.gallery, ImageSource.camera])
+                  GestureDetector(
+                    onTap: () async {
+                      try {
+                        final x = await ImagePicker().pickImage(source: src, maxWidth: 360, maxHeight: 360, imageQuality: 65);
+                        if (x == null) return;
+                        final bytes = await x.readAsBytes();
+                        setS(() => img = base64Encode(bytes));
+                      } catch (e) {
+                        if (context.mounted) toast(context, 'Photo levama error: $e', err: true);
+                      }
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                      decoration: BoxDecoration(color: kBrandSoft, borderRadius: BorderRadius.circular(20)),
+                      child: Text(src == ImageSource.gallery ? 'Gallery' : 'Camera',
+                          style: const TextStyle(color: kBrand, fontWeight: FontWeight.w700, fontSize: 13)),
+                    ),
+                  ),
+                if (img.isNotEmpty)
+                  GestureDetector(
+                    onTap: () => setS(() => img = ''),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                      decoration: BoxDecoration(color: const Color(0xFFFEE2E2), borderRadius: BorderRadius.circular(20)),
+                      child: const Text('Kadho', style: TextStyle(color: kBad, fontWeight: FontWeight.w700, fontSize: 13)),
+                    ),
+                  ),
+              ]),
+              const SizedBox(height: 14),
               TextField(controller: nm, decoration: const InputDecoration(labelText: 'Item nu naam')),
               const SizedBox(height: 10),
               TextField(
@@ -1482,7 +1550,11 @@ class MenuPage extends StatelessWidget {
       toast(context, 'Item nu naam ane price nakho', err: true);
       return;
     }
-    final data = {'name': name, 'cat': sec, 'price': price, 'cost': double.tryParse(co.text.trim()) ?? 0};
+    if (img.length > 600000) {
+      toast(context, 'Photo ghano moto che, bijo photo lo', err: true);
+      return;
+    }
+    final data = {'name': name, 'cat': sec, 'price': price, 'cost': double.tryParse(co.text.trim()) ?? 0, 'img': img};
     await run(context, () => d == null ? c.col('menu').add(data) : d.reference.update(data));
   }
 
@@ -1554,9 +1626,11 @@ class MenuPage extends StatelessWidget {
                 for (final d in docs.where((m) => secOf(m.data()) == sec))
                   Surface(
                     margin: const EdgeInsets.only(bottom: 10),
-                    padding: const EdgeInsets.fromLTRB(16, 12, 6, 12),
+                    padding: const EdgeInsets.fromLTRB(12, 10, 6, 10),
                     onTap: () => editItem(context, d),
                     child: Row(children: [
+                      itemImg(d.id, d.data()),
+                      const SizedBox(width: 12),
                       Expanded(
                         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                           Text('${d['name']}',
