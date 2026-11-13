@@ -27,6 +27,16 @@ jobs:
       - name: App icon
         run: |
           if [ -f icon.png ] && [ -f icon_fg.png ]; then dart run flutter_launcher_icons; fi
+      - name: Disable Android lint (plugin lint crash fix)
+        run: |
+          mkdir -p ~/.gradle/init.d
+          cat > ~/.gradle/init.d/nolint.gradle <<'EOF'
+          allprojects {
+            tasks.configureEach { t ->
+              if (t.name.startsWith('lint')) { t.enabled = false }
+            }
+          }
+          EOF
       - run: flutter build apk --release
       - uses: actions/upload-artifact@v4
         with:
