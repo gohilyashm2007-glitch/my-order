@@ -24,6 +24,9 @@ jobs:
           sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <application#' android/app/src/main/AndroidManifest.xml
           sed -i 's/flutter.minSdkVersion/23/' android/app/build.gradle*
       - run: flutter pub get
+      - name: App icon
+        run: |
+          if [ -f icon.png ] && [ -f icon_fg.png ]; then dart run flutter_launcher_icons; fi
       - run: flutter build apk --release
       - uses: actions/upload-artifact@v4
         with:
