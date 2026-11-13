@@ -1,7 +1,7 @@
 name: manager
 description: My Order - restaurant app
 publish_to: 'none'
-version: 1.1.0+2
+version: 1.2.0+3
 environment:
   sdk: ^3.0.0
 dependencies:
@@ -12,5 +12,14 @@ dependencies:
   cloud_firestore: ^5.4.4
   google_fonts: ^6.2.1
   share_plus: ^10.1.4
+  image_picker: ^1.1.2
+dev_dependencies:
+  flutter_launcher_icons: ^0.14.1
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: "icon.png"
+  adaptive_icon_background: "#E4572E"
+  adaptive_icon_foreground: "icon_fg.png"
 flutter:
   uses-material-design: true
