@@ -482,52 +482,106 @@ class BillCard extends StatelessWidget {
   }
 }
 
+Future<void> showErr(BuildContext context, String title, String msg) => showDialog<void>(
+      context: context,
+      builder: (d) => AlertDialog(
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+        content: SingleChildScrollView(child: SelectableText(msg)),
+        actions: [TextButton(onPressed: () => Navigator.pop(d), child: const Text('Ok'))],
+      ),
+    );
+
+/// Bill ne image banavi ne phone nu share menu (WhatsApp vagere) kholo.
 Future<void> shareBill(BuildContext context, GlobalKey key, Json o) async {
+  Uint8List bytes;
   try {
     final boundary = key.currentContext!.findRenderObject() as RenderRepaintBoundary;
     final img = await boundary.toImage(pixelRatio: 3);
     final bd = await img.toByteData(format: ui.ImageByteFormat.png);
-    final f = File('${Directory.systemTemp.path}/bill_table_${o['table']}_${DateTime.now().millisecondsSinceEpoch}.png');
-    await f.writeAsBytes(bd!.buffer.asUint8List());
-    await Share.shareXFiles([XFile(f.path, mimeType: 'image/png')], text: 'Tamaru bill');
+    bytes = bd!.buffer.asUint8List();
   } catch (e) {
-    if (context.mounted) toast(context, 'Bill image banavva ma error: $e', err: true);
+    if (context.mounted) await showErr(context, 'Bill image banavva ma error', '$e');
+    return;
+  }
+  final name = 'bill_table_${o['table']}_${DateTime.now().millisecondsSinceEpoch}.png';
+  try {
+    final f = File('${Directory.systemTemp.path}/$name');
+    await f.writeAsBytes(bytes);
+    await Share.shareXFiles([XFile(f.path, mimeType: 'image/png')], text: 'Tamaru bill');
+  } catch (e1) {
+    try {
+      await Share.shareXFiles([XFile.fromData(bytes, mimeType: 'image/png', name: name)],
+          fileNameOverrides: [name], text: 'Tamaru bill');
+    } catch (e2) {
+      if (context.mounted) await showErr(context, 'WhatsApp / share khulyu nahi', '$e1\n\n$e2');
+    }
   }
 }
 
-Future<void> showBill(BuildContext context, String shop, Json o, {String? pay}) {
+class BillSheet extends StatefulWidget {
+  final String shop;
+  final Json o;
+  final String? pay;
+  final bool auto;
+  const BillSheet({required this.shop, required this.o, this.pay, this.auto = false, super.key});
+  @override
+  State<BillSheet> createState() => _BillSheetState();
+}
+
+class _BillSheetState extends State<BillSheet> {
   final key = GlobalKey();
-  return showModalBottomSheet<void>(
-    context: context,
-    isScrollControlled: true,
-    backgroundColor: kBg,
-    shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-    builder: (b) => SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Flexible(
-            child: SingleChildScrollView(
-              child: Center(
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
-                  child: RepaintBoundary(key: key, child: BillCard(shop: shop, o: o, pay: pay)),
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.auto) {
+      // Sheet dekhai jay pachi potani jate share menu kholo
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        Future.delayed(const Duration(milliseconds: 450), () {
+          if (mounted) shareBill(context, key, widget.o);
+        });
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Flexible(
+              child: SingleChildScrollView(
+                child: Center(
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: RepaintBoundary(key: key, child: BillCard(shop: widget.shop, o: widget.o, pay: widget.pay)),
+                  ),
                 ),
               ),
             ),
-          ),
-          const SizedBox(height: 14),
-          FilledButton.icon(
-            style: FilledButton.styleFrom(backgroundColor: const Color(0xFF25D366)),
-            onPressed: () => shareBill(b, key, o),
-            icon: const Icon(Icons.share),
-            label: const Text('WhatsApp par moklo'),
-          ),
-        ]),
-      ),
-    ),
-  );
+            const SizedBox(height: 14),
+            FilledButton.icon(
+              style: FilledButton.styleFrom(backgroundColor: const Color(0xFF25D366)),
+              onPressed: () => shareBill(context, key, widget.o),
+              icon: const Icon(Icons.share),
+              label: const Text('WhatsApp par moklo'),
+            ),
+          ]),
+        ),
+      );
 }
+
+Future<void> showBill(BuildContext context, String shop, Json o, {String? pay, bool auto = false}) =>
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: kBg,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (b) => BillSheet(shop: shop, o: o, pay: pay, auto: auto),
+    );
 
 // ---------------- app / session ----------------
 class Ctx {
@@ -1597,7 +1651,9 @@ class BillsPage extends StatelessWidget {
     if (ok && context.mounted) {
       final paidO = <String, dynamic>{...o, 'pay': mode};
       toast(context, 'Table ${o['table']} nu bill ${rs(orderTotal(o))} ($mode) close thayu',
-          action: 'Bill moklo', onAction: () => showBill(context, c.name, paidO, pay: mode));
+          action: 'Bill moklo', onAction: () {
+        if (context.mounted) showBill(context, c.name, paidO, pay: mode, auto: true);
+      });
     }
   }
 
