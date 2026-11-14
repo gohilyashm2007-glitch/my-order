@@ -1,0 +1,56 @@
+name: Deploy Web
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - name: Web scaffold
+        run: |
+          flutter create --org com.restoapp --project-name manager --platforms web tmp_scaffold
+          cp -r tmp_scaffold/web ./web
+          rm -rf tmp_scaffold
+          sed -i 's#<title>[^<]*</title>#<title>My Order</title>#' web/index.html
+          sed -i 's#content="manager"#content="My Order"#g' web/index.html
+          sed -i 's#"name": "[^"]*"#"name": "My Order"#; s#"short_name": "[^"]*"#"short_name": "My Order"#' web/manifest.json
+      - run: flutter pub get
+      - name: Web icons
+        run: |
+          cat > flutter_launcher_icons-web.yaml <<'EOT'
+          flutter_launcher_icons:
+            android: false
+            ios: false
+            image_path: "icon.png"
+            web:
+              generate: true
+              image_path: "icon.png"
+              background_color: "#F5F6F8"
+              theme_color: "#E4572E"
+          EOT
+          if [ -f icon.png ]; then dart run flutter_launcher_icons -f flutter_launcher_icons-web.yaml; fi
+      - run: flutter build web --release --base-href /my-order/
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/web
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
