@@ -179,6 +179,11 @@ String errText(Object? e) {
   return '$e';
 }
 
+String fmtTime(DateTime d) {
+  final h = d.hour % 12 == 0 ? 12 : d.hour % 12;
+  return '$h:${d.minute.toString().padLeft(2, '0')} ${d.hour >= 12 ? 'PM' : 'AM'}';
+}
+
 String fmtDate(dynamic ts) {
   if (ts is! Timestamp) return '';
   const mo = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -412,11 +417,12 @@ class BillCard extends StatelessWidget {
   final String shop;
   final Json o;
   final String? pay;
-  const BillCard({required this.shop, required this.o, this.pay, super.key});
+  final DateTime? at;
+  const BillCard({required this.shop, required this.o, this.pay, this.at, super.key});
 
   String when() {
     const mo = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    final d = DateTime.now();
+    final d = at ?? DateTime.now();
     final h = d.hour % 12 == 0 ? 12 : d.hour % 12;
     final m = d.minute.toString().padLeft(2, '0');
     return '${d.day} ${mo[d.month - 1]} ${d.year}, $h:$m ${d.hour >= 12 ? 'PM' : 'AM'}';
@@ -526,7 +532,8 @@ class BillSheet extends StatefulWidget {
   final Json o;
   final String? pay;
   final bool auto;
-  const BillSheet({required this.shop, required this.o, this.pay, this.auto = false, super.key});
+  final DateTime? at;
+  const BillSheet({required this.shop, required this.o, this.pay, this.auto = false, this.at, super.key});
   @override
   State<BillSheet> createState() => _BillSheetState();
 }
@@ -557,7 +564,7 @@ class _BillSheetState extends State<BillSheet> {
                 child: Center(
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(12),
-                    child: RepaintBoundary(key: key, child: BillCard(shop: widget.shop, o: widget.o, pay: widget.pay)),
+                    child: RepaintBoundary(key: key, child: BillCard(shop: widget.shop, o: widget.o, pay: widget.pay, at: widget.at)),
                   ),
                 ),
               ),
@@ -574,13 +581,13 @@ class _BillSheetState extends State<BillSheet> {
       );
 }
 
-Future<void> showBill(BuildContext context, String shop, Json o, {String? pay, bool auto = false}) =>
+Future<void> showBill(BuildContext context, String shop, Json o, {String? pay, bool auto = false, DateTime? at}) =>
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       backgroundColor: kBg,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-      builder: (b) => BillSheet(shop: shop, o: o, pay: pay, auto: auto),
+      builder: (b) => BillSheet(shop: shop, o: o, pay: pay, auto: auto, at: at),
     );
 
 // ---------------- app / session ----------------
@@ -1262,6 +1269,35 @@ class Home extends StatefulWidget {
 
 class _HomeState extends State<Home> {
   int i = 0;
+  Timer? cleanTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    cleanup();
+    cleanTimer = Timer.periodic(const Duration(minutes: 3), (_) => cleanup());
+  }
+
+  @override
+  void dispose() {
+    cleanTimer?.cancel();
+    super.dispose();
+  }
+
+  /// 1 kalak thi juna paid bills database mathi delete kare.
+  Future<void> cleanup() async {
+    try {
+      final cutoff = Timestamp.fromDate(DateTime.now().subtract(const Duration(hours: 1)));
+      final qs = await widget.c.col('orders').where('paidTs', isLessThan: cutoff).limit(300).get();
+      if (qs.docs.isEmpty) return;
+      final b = db.batch();
+      for (final d in qs.docs) {
+        b.delete(d.reference);
+      }
+      await b.commit();
+    } catch (_) {}
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = widget.c;
@@ -1663,7 +1699,13 @@ class BillsPage extends StatelessWidget {
         builder: (_, s) {
           final List<QDoc> docs = [...(s.data?.docs ?? <QDoc>[])]
             ..sort((a, b) => _n(a['table']).compareTo(_n(b['table'])));
-          return Pg('Bills', sub: '${docs.length} chalu bill', children: [
+          return Pg('Bills',
+              sub: '${docs.length} chalu bill',
+              trailing: TextButton.icon(
+                  onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => HistoryPage(c: c))),
+                  icon: const Icon(Icons.history, size: 20),
+                  label: const Text('History')),
+              children: [
             if (docs.isEmpty) empty(Icons.receipt_long_outlined, 'Koi chalu bill nathi.\nWaiter order lese tyare ahiya dekhase.'),
             for (final d in docs)
               Surface(
@@ -1724,6 +1766,102 @@ class BillsPage extends StatelessWidget {
               ),
           ]);
         },
+      );
+}
+
+class HistoryPage extends StatefulWidget {
+  final Ctx c;
+  const HistoryPage({required this.c, super.key});
+  @override
+  State<HistoryPage> createState() => _HistoryPageState();
+}
+
+class _HistoryPageState extends State<HistoryPage> {
+  late final Stream<QuerySnapshot<Json>> stream;
+  Timer? tick;
+
+  @override
+  void initState() {
+    super.initState();
+    final cutoff = Timestamp.fromDate(DateTime.now().subtract(const Duration(hours: 1)));
+    stream = widget.c.col('orders').where('paidTs', isGreaterThanOrEqualTo: cutoff).snapshots();
+    tick = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    tick?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: const Text('Bill History')),
+        body: StreamBuilder<QuerySnapshot<Json>>(
+          stream: stream,
+          builder: (_, s) {
+            final now = DateTime.now();
+            final rows = <MapEntry<DateTime, QDoc>>[];
+            for (final d in s.data?.docs ?? <QDoc>[]) {
+              final t = (d.data()['paidTs'] as Timestamp?)?.toDate() ?? now;
+              if (now.difference(t) < const Duration(hours: 1)) rows.add(MapEntry(t, d));
+            }
+            rows.sort((a, b) => b.key.compareTo(a.key));
+            final total = rows.fold<num>(0, (a, e) => a + orderTotal(e.value.data()));
+            return ListView(
+              physics: const BouncingScrollPhysics(),
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+              children: [
+                Surface(
+                  color: kBrandSoft,
+                  border: kBrandLine,
+                  margin: const EdgeInsets.only(bottom: 14),
+                  child: Row(children: [
+                    const Icon(Icons.history, color: kBrand),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                          'Paid bills ahiya 1 kalak sudhi dekhase, pachi database mathi delete thai jase.\nAtyare: ${rows.length} bill  ·  ${rs(total)}',
+                          style: const TextStyle(fontSize: 13, height: 1.35)),
+                    ),
+                  ]),
+                ),
+                if (rows.isEmpty) empty(Icons.receipt_long_outlined, 'Chhella 1 kalak ma koi bill paid thayu nathi'),
+                for (final e in rows)
+                  Surface(
+                    margin: const EdgeInsets.only(bottom: 10),
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Row(children: [
+                        Text('Table ${e.value['table']}', style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
+                        const SizedBox(width: 8),
+                        pill('${e.value.data()['pay'] ?? 'Cash'}', bg: kOkSoft, fg: kOk),
+                        const Spacer(),
+                        Text(rs(orderTotal(e.value.data())), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+                      ]),
+                      const SizedBox(height: 6),
+                      Text(grouped(e.value.data()).map((g) => '${g['n']} × ${_n(g['q']).toInt()}').join(',  '),
+                          style: const TextStyle(color: kMute, fontSize: 13)),
+                      const SizedBox(height: 10),
+                      Row(children: [
+                        Expanded(
+                          child: Text('${fmtTime(e.key)}  ·  ~${max(1, 60 - now.difference(e.key).inMinutes)} min ma delete',
+                              style: const TextStyle(color: kMute, fontSize: 12.5)),
+                        ),
+                        TextButton.icon(
+                          onPressed: () => showBill(context, widget.c.name, e.value.data(),
+                              pay: '${e.value.data()['pay'] ?? 'Cash'}', at: e.key),
+                          icon: const Icon(Icons.share, size: 18),
+                          label: const Text('Bill moklo'),
+                        ),
+                      ]),
+                    ]),
+                  ),
+              ],
+            );
+          },
+        ),
       );
 }
 
