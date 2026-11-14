@@ -7,12 +7,15 @@ import 'dart:math';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:share_plus/share_plus.dart';
+
+import 'web_config.dart';
 
 typedef Json = Map<String, dynamic>;
 typedef QDoc = QueryDocumentSnapshot<Map<String, dynamic>>;
@@ -32,14 +35,39 @@ const kBad = Color(0xFFDC2626);
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  if (kIsWeb && (kWebAppId.startsWith('PASTE') || kWebApiKey.startsWith('PASTE'))) {
+    runApp(const MaterialApp(
+      home: Scaffold(
+        body: Center(
+          child: Padding(
+            padding: EdgeInsets.all(24),
+            child: Text(
+              'Web app mate Firebase Web config baki che.\nlib/web_config.dart ma apiKey ane appId nakho.',
+              textAlign: TextAlign.center,
+            ),
+          ),
+        ),
+      ),
+    ));
+    return;
+  }
   await Firebase.initializeApp(
-    options: const FirebaseOptions(
-      apiKey: 'AIzaSyB-l8MbY7reEOS8AUbH_ld87ZAP4Q0sh94',
-      appId: '1:744106925844:android:0259baf77c1cee0dc82c01',
-      messagingSenderId: '744106925844',
-      projectId: 'restaurant-manager-c2368',
-      storageBucket: 'restaurant-manager-c2368.firebasestorage.app',
-    ),
+    options: kIsWeb
+        ? const FirebaseOptions(
+            apiKey: kWebApiKey,
+            appId: kWebAppId,
+            messagingSenderId: '744106925844',
+            projectId: 'restaurant-manager-c2368',
+            authDomain: 'restaurant-manager-c2368.firebaseapp.com',
+            storageBucket: 'restaurant-manager-c2368.firebasestorage.app',
+          )
+        : const FirebaseOptions(
+            apiKey: 'AIzaSyB-l8MbY7reEOS8AUbH_ld87ZAP4Q0sh94',
+            appId: '1:744106925844:android:0259baf77c1cee0dc82c01',
+            messagingSenderId: '744106925844',
+            projectId: 'restaurant-manager-c2368',
+            storageBucket: 'restaurant-manager-c2368.firebasestorage.app',
+          ),
   );
   runApp(const MyOrderApp());
 }
@@ -288,6 +316,14 @@ class Seg extends StatelessWidget {
       );
 }
 
+/// Niche kheechi ne refresh: server sathe connection fari chalu kare (data to live potani jate update thay chhe).
+Future<void> refreshData() async {
+  try {
+    await db.disableNetwork();
+    await db.enableNetwork();
+  } catch (_) {}
+}
+
 class Pg extends StatelessWidget {
   final String title;
   final String? sub;
@@ -297,8 +333,11 @@ class Pg extends StatelessWidget {
   @override
   Widget build(BuildContext context) => SafeArea(
         bottom: false,
-        child: ListView(
-          physics: const BouncingScrollPhysics(),
+        child: RefreshIndicator(
+          color: kBrand,
+          onRefresh: refreshData,
+          child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
           padding: const EdgeInsets.fromLTRB(16, 14, 16, 24),
           children: [
             Row(children: [
@@ -316,6 +355,7 @@ class Pg extends StatelessWidget {
             const SizedBox(height: 16),
             ...children,
           ],
+        ),
         ),
       );
 }
@@ -513,6 +553,17 @@ Future<void> shareBill(BuildContext context, GlobalKey key, Json o) async {
     return;
   }
   final name = 'bill_table_${o['table']}_${DateTime.now().millisecondsSinceEpoch}.png';
+  if (kIsWeb) {
+    try {
+      await Share.shareXFiles([XFile.fromData(bytes, mimeType: 'image/png', name: name)],
+          fileNameOverrides: [name], text: 'Tamaru bill');
+    } catch (e) {
+      if (context.mounted) {
+        await showErr(context, 'Aa browser ma bill share nathi thatu', 'Phone na Chrome ke Safari ma vapro.\n\n$e');
+      }
+    }
+    return;
+  }
   try {
     final f = File('${Directory.systemTemp.path}/$name');
     await f.writeAsBytes(bytes);
@@ -636,6 +687,15 @@ class MyOrderApp extends StatelessWidget {
       title: 'My Order',
       debugShowCheckedModeBanner: false,
       theme: base.copyWith(textTheme: GoogleFonts.interTextTheme(base.textTheme)),
+      builder: (context, child) => kIsWeb
+          ? ColoredBox(
+              color: kBg,
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 560), child: child ?? const SizedBox()),
+              ),
+            )
+          : (child ?? const SizedBox()),
       home: const Root(),
     );
   }
