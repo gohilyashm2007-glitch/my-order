@@ -14,7 +14,9 @@ import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
+import 'pay_config.dart';
 import 'web_config.dart';
 
 typedef Json = Map<String, dynamic>;
@@ -202,9 +204,81 @@ Widget itemImg(String id, Json d, {double size = 52}) {
 
 String errText(Object? e) {
   if (e is FirebaseException && e.code == 'permission-denied') {
-    return 'Permission nathi (restaurant band che, approve baki che ke email verify baki che)';
+    return 'Permission nathi (restaurant band che, plan puru thayu che, approve baki che ke email verify baki che)';
   }
   return '$e';
+}
+
+/// Roj nu summary (stats) - bills delete thay to pan vechan na totals rahe chhe.
+String dayKey(DateTime d) => '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+String safeKey(String s) {
+  var k = s.trim().replaceAll(RegExp(r'[.\[\]*~/`\\]'), '_');
+  if (k.length > 60) k = k.substring(0, 60);
+  if (k.isEmpty || k.startsWith('__')) k = 'item_$k';
+  return k;
+}
+
+Json statsData(Json o, String mode) {
+  final acc = <String, List<num>>{};
+  final names = <String, String>{};
+  for (final g in grouped(o)) {
+    final k = safeKey('${g['n']}');
+    names[k] = '${g['n']}';
+    final a = acc.putIfAbsent(k, () => [0, 0]);
+    a[0] += _n(g['q']);
+    a[1] += _n(g['p']) * _n(g['q']);
+  }
+  final items = <String, dynamic>{
+    for (final e in acc.entries)
+      e.key: {'n': names[e.key], 'q': FieldValue.increment(e.value[0]), 'r': FieldValue.increment(e.value[1])}
+  };
+  final pk = {'Cash': 'cash', 'UPI': 'upi', 'Card': 'card'}[mode] ?? 'cash';
+  return {
+    'day': dayKey(DateTime.now()),
+    'sales': FieldValue.increment(orderTotal(o)),
+    'cost': FieldValue.increment(orderCost(o)),
+    'bills': FieldValue.increment(1),
+    pk: FieldValue.increment(orderTotal(o)),
+    'items': items,
+  };
+}
+
+class Plan {
+  final String id, label;
+  final int months, days, price;
+  const Plan(this.id, this.label, this.months, this.days, this.price);
+}
+
+const kPlans = [
+  Plan('m1', '1 Mahino', 1, 30, 499),
+  Plan('m3', '3 Mahina', 3, 90, 1399),
+  Plan('m6', '6 Mahina', 6, 180, 2699),
+  Plan('m12', '12 Mahina', 12, 365, 5299),
+];
+
+class Grant {
+  final String label;
+  final int days;
+  const Grant(this.label, this.days);
+}
+
+const kGrants = [
+  Grant('Trial 7 divas', 7),
+  Grant('15 divas', 15),
+  Grant('1 Mahino', 30),
+  Grant('3 Mahina', 90),
+  Grant('6 Mahina', 180),
+  Grant('12 Mahina', 365),
+];
+
+String planLeftText(DateTime? end) {
+  if (end == null) return 'Haji koi plan nathi';
+  final left = end.difference(DateTime.now());
+  final date = fmtDate(Timestamp.fromDate(end));
+  if (left.isNegative) return 'Plan puru thayo ($date)';
+  if (left.inDays >= 1) return 'Baki ${left.inDays} divas  ·  $date sudhi';
+  return 'Baki ${max(1, left.inHours)} kalak';
 }
 
 String fmtTime(DateTime d) {
@@ -652,6 +726,10 @@ class Ctx {
   bool get owner => role == 'owner';
   String get roleLabel => {'owner': 'Owner', 'waiter': 'Order lenar', 'cashier': 'Bill counter'}[role] ?? role;
   List<String> get sections => [for (final e in (r['sections'] ?? []) as List) '$e'];
+  DateTime? get planEnd {
+    final v = r['planEnd'];
+    return v is Timestamp ? v.toDate() : null;
+  }
 }
 
 class MyOrderApp extends StatelessWidget {
@@ -750,6 +828,7 @@ class _GateState extends State<Gate> {
   int attempt = 0;
   bool ready = false, gaveUp = false;
   bool verified = FirebaseAuth.instance.currentUser?.emailVerified ?? false;
+  Timer? clock;
 
   Stream<DocumentSnapshot<Json>> admStream() => db.collection('admins').doc(widget.user.uid).snapshots();
   Stream<DocumentSnapshot<Json>> usStream() => db.collection('users').doc(widget.user.uid).snapshots();
@@ -760,11 +839,16 @@ class _GateState extends State<Gate> {
     adm = admStream();
     us = usStream();
     timer = Timer(const Duration(seconds: 5), onSlow);
+    // Plan puro thay te moment e screen badalva mate darek minute check
+    clock = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (mounted && ready) setState(() {});
+    });
   }
 
   @override
   void dispose() {
     timer?.cancel();
+    clock?.cancel();
     super.dispose();
   }
 
@@ -866,13 +950,24 @@ class _GateState extends State<Gate> {
               return StreamBuilder<DocumentSnapshot<Json>>(
                 stream: rs,
                 builder: (_, r) {
-                  if (r.hasError) return wait('', err: errText(r.error));
+                  if (r.hasError) {
+                    final e = r.error;
+                    final denied = e is FirebaseException && e.code == 'permission-denied';
+                    return wait('', err: denied && ud['role'] != 'owner'
+                        ? 'Restaurant nu plan puru thayu hoi shake chhe (ke band che). Owner ne recharge karva kaho.'
+                        : errText(e));
+                  }
                   if (!r.hasData || !r.data!.exists) return wait('Restaurant load thai rahi che...');
                   final rd = r.data!.data()!;
                   ready = true;
                   timer?.cancel();
                   final st = '${rd['status'] ?? ''}';
                   if (st != 'approved') return PendingPage(name: '${rd['name'] ?? ''}', status: st);
+                  final pe = rd['planEnd'];
+                  final end = pe is Timestamp ? pe.toDate() : null;
+                  if (end == null || !end.isAfter(DateTime.now())) {
+                    return RechargePage(rid: rid, shop: '${rd['name'] ?? ''}', isOwner: ud['role'] == 'owner', end: end);
+                  }
                   return Home(c: Ctx(rid, ud['role'] as String, (ud['name'] ?? '') as String, rd));
                 },
               );
@@ -1020,6 +1115,202 @@ class PendingPage extends StatelessWidget {
   }
 }
 
+// ---------------- RECHARGE ----------------
+class RechargePage extends StatefulWidget {
+  final String rid, shop;
+  final bool isOwner, showBack;
+  final DateTime? end;
+  const RechargePage({required this.rid, required this.shop, required this.isOwner, this.end, this.showBack = false, super.key});
+  @override
+  State<RechargePage> createState() => _RechargePageState();
+}
+
+class _RechargePageState extends State<RechargePage> {
+  bool opened = false;
+
+  Future<void> pay(Plan p) async {
+    if (kPayBase.startsWith('PASTE')) {
+      toast(context, 'Payment setup baki che (lib/pay_config.dart ma Worker link nakho)', err: true);
+      return;
+    }
+    final u = FirebaseAuth.instance.currentUser;
+    final uri = Uri.parse('$kPayBase/pay').replace(queryParameters: {
+      'rid': widget.rid,
+      'plan': p.id,
+      'email': u?.email ?? '',
+      'name': widget.shop,
+    });
+    try {
+      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!mounted) return;
+      if (ok) {
+        setState(() => opened = true);
+      } else {
+        toast(context, 'Payment page khuli nahi', err: true);
+      }
+    } catch (e) {
+      if (mounted) toast(context, 'Payment page khuli nahi: $e', err: true);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final expired = widget.end != null && !widget.end!.isAfter(DateTime.now());
+    return Scaffold(
+      appBar: widget.showBack ? AppBar(title: const Text('Plan recharge')) : null,
+      body: SafeArea(
+        child: ListView(
+          physics: const BouncingScrollPhysics(),
+          padding: const EdgeInsets.fromLTRB(16, 20, 16, 24),
+          children: [
+            Center(
+              child: Container(
+                width: 64,
+                height: 64,
+                decoration: const BoxDecoration(color: kBrandSoft, shape: BoxShape.circle),
+                child: Icon(expired || widget.end == null ? Icons.lock_outline : Icons.verified_outlined, color: kBrand, size: 30),
+              ),
+            ),
+            const SizedBox(height: 14),
+            Text(widget.end == null ? 'Plan chalu karo' : expired ? 'Plan puru thayo' : 'Plan recharge',
+                textAlign: TextAlign.center, style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w800, letterSpacing: -0.5)),
+            const SizedBox(height: 6),
+            Text(widget.shop, textAlign: TextAlign.center, style: const TextStyle(color: kMute)),
+            Text(planLeftText(widget.end), textAlign: TextAlign.center, style: const TextStyle(color: kBrand, fontWeight: FontWeight.w700)),
+            const SizedBox(height: 20),
+            if (!widget.isOwner)
+              const Surface(
+                child: Text('App chalu karva mate restaurant na Owner e plan recharge karvo padse. Owner ne recharge karva kaho.',
+                    style: TextStyle(height: 1.4)),
+              ),
+            if (widget.isOwner)
+              for (final p in kPlans)
+                Surface(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  onTap: () => pay(p),
+                  child: Row(children: [
+                    Expanded(
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text(p.label, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+                        const SizedBox(height: 2),
+                        Text('${rs((p.price / p.months).round())} / mahino', style: const TextStyle(color: kMute, fontSize: 13)),
+                      ]),
+                    ),
+                    Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                      Text(rs(p.price), style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
+                      if (499 * p.months - p.price > 0) pill('Bachat ${rs(499 * p.months - p.price)}', bg: kOkSoft, fg: kOk),
+                    ]),
+                  ]),
+                ),
+            if (opened)
+              Surface(
+                color: kOkSoft,
+                border: const Color(0xFFBFE5CB),
+                child: const Text('Payment karya pachi 1 minute ma plan potani jate chalu thai jase. Aa screen par pachha aavo.',
+                    style: TextStyle(height: 1.4)),
+              ),
+            const SizedBox(height: 4),
+            OutlinedButton(
+              style: OutlinedButton.styleFrom(
+                  minimumSize: const Size.fromHeight(48),
+                  side: const BorderSide(color: kLine),
+                  backgroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))),
+              onPressed: () async {
+                await refreshData();
+                if (context.mounted) toast(context, 'Refresh thayu');
+              },
+              child: const Text('Maine payment karyu, refresh karo', style: TextStyle(fontWeight: FontWeight.w700)),
+            ),
+            if (!widget.showBack)
+              TextButton(onPressed: () => FirebaseAuth.instance.signOut(), child: const Text('Logout', style: TextStyle(color: kMute))),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------- ADMIN: PAYMENTS ----------------
+class PaymentsPage extends StatelessWidget {
+  const PaymentsPage({super.key});
+
+  Widget tile(String l, String v) => Expanded(
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(l, style: const TextStyle(color: kMute, fontSize: 12)),
+          const SizedBox(height: 2),
+          Text(v, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
+        ]),
+      );
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: const Text('Payments')),
+        body: StreamBuilder<QuerySnapshot<Json>>(
+          stream: db.collection('payments').snapshots(),
+          builder: (_, s) {
+            if (s.hasError) return Center(child: Text('Error: ${errText(s.error)}'));
+            final List<QDoc> all = [...(s.data?.docs ?? <QDoc>[])]
+              ..sort((a, b) => ((b.data()['paidAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0)
+                  .compareTo((a.data()['paidAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0));
+            final now = DateTime.now();
+            final monthStart = DateTime(now.year, now.month, 1);
+            num total = 0, month = 0;
+            var paid = 0;
+            for (final d in all) {
+              final o = d.data();
+              if ('${o['source']}' != 'razorpay') continue;
+              final amt = _n(o['amount']);
+              total += amt;
+              paid++;
+              final t = (o['paidAt'] as Timestamp?)?.toDate();
+              if (t != null && !t.isBefore(monthStart)) month += amt;
+            }
+            return ListView(
+              physics: const BouncingScrollPhysics(),
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+              children: [
+                Surface(
+                  margin: const EdgeInsets.only(bottom: 14),
+                  child: Row(children: [tile('Kul avak', rs(total)), tile('Aa mahino', rs(month)), tile('Payments', '$paid')]),
+                ),
+                if (all.isEmpty) empty(Icons.account_balance_wallet_outlined, 'Haji koi payment nathi'),
+                for (final d in all)
+                  Builder(builder: (_) {
+                    final o = d.data();
+                    final t = (o['paidAt'] as Timestamp?)?.toDate();
+                    final free = '${o['source']}' == 'admin';
+                    return Surface(
+                      margin: const EdgeInsets.only(bottom: 10),
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Row(children: [
+                          Expanded(
+                              child: Text('${o['restaurantName'] ?? o['rid']}',
+                                  maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800))),
+                          Text(free ? 'Free' : rs(_n(o['amount'])),
+                              style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: free ? kMute : kOk)),
+                        ]),
+                        const SizedBox(height: 6),
+                        Row(children: [
+                          pill('${o['planLabel'] ?? o['plan']}'),
+                          const SizedBox(width: 8),
+                          if (!free) pill('${o['method'] ?? 'razorpay'}', bg: kOkSoft, fg: kOk),
+                          if (free) pill('Admin e aapyu', bg: const Color(0xFFE9EBEF), fg: kMute),
+                        ]),
+                        const SizedBox(height: 6),
+                        Text(t == null ? '' : '${fmtDate(Timestamp.fromDate(t))}  ·  ${fmtTime(t)}', style: const TextStyle(color: kMute, fontSize: 12.5)),
+                        if (!free && o['paymentId'] != null)
+                          Text('${o['paymentId']}', style: const TextStyle(color: kMute, fontSize: 11.5)),
+                      ]),
+                    );
+                  }),
+              ],
+            );
+          },
+        ),
+      );
+}
+
 // ---------------- ADMIN PANEL ----------------
 class AdminPage extends StatefulWidget {
   const AdminPage({super.key});
@@ -1056,6 +1347,63 @@ class _AdminPageState extends State<AdminPage> {
     await run(context, () => d.reference.update({'status': st}));
   }
 
+  bool planOk(Json o) {
+    final e = (o['planEnd'] as Timestamp?)?.toDate();
+    return e != null && e.isAfter(DateTime.now());
+  }
+
+  /// Admin restaurant ne free plan aape. Chalu plan hoy to tena upar umerae chhe.
+  Future<void> grantPlan(QDoc d) async {
+    final o = d.data();
+    final g = await showModalBottomSheet<Grant>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (b) => SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('${o['name']} ne free plan apo', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 2),
+            Text(planLeftText((o['planEnd'] as Timestamp?)?.toDate()), style: const TextStyle(color: kMute)),
+            const SizedBox(height: 16),
+            for (final gr in kGrants)
+              Surface(
+                margin: const EdgeInsets.only(bottom: 10),
+                onTap: () => Navigator.pop(b, gr),
+                child: Row(children: [
+                  const Icon(Icons.card_giftcard_outlined, color: kBrand),
+                  const SizedBox(width: 14),
+                  Text(gr.label, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                ]),
+              ),
+          ]),
+        ),
+      ),
+    );
+    if (g == null || !mounted) return;
+    final now = DateTime.now();
+    final cur = (o['planEnd'] as Timestamp?)?.toDate();
+    final base = (cur != null && cur.isAfter(now)) ? cur : now;
+    final end = base.add(Duration(days: g.days));
+    final batch = db.batch();
+    batch.update(d.reference, {'planEnd': Timestamp.fromDate(end), 'plan': 'free', 'planUpdated': FieldValue.serverTimestamp()});
+    batch.set(db.collection('payments').doc(), {
+      'rid': d.id,
+      'restaurantName': '${o['name'] ?? ''}',
+      'plan': 'free',
+      'planLabel': g.label,
+      'days': g.days,
+      'amount': 0,
+      'source': 'admin',
+      'paidAt': FieldValue.serverTimestamp(),
+      'planEnd': Timestamp.fromDate(end),
+    });
+    final ok = await run(context, () => batch.commit());
+    if (ok && mounted) toast(context, '${o['name']} ne ${g.label} no free plan malyo');
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
         body: StreamBuilder<QuerySnapshot<Json>>(
@@ -1071,7 +1419,13 @@ class _AdminPageState extends State<AdminPage> {
                   .compareTo((a.data()['created'] as Timestamp?)?.millisecondsSinceEpoch ?? 0));
             return Pg('Admin panel',
                 sub: 'Restaurant approval',
-                trailing: IconButton(onPressed: () => FirebaseAuth.instance.signOut(), icon: const Icon(Icons.logout, color: kMute)),
+                trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                  TextButton.icon(
+                      onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const PaymentsPage())),
+                      icon: const Icon(Icons.account_balance_wallet_outlined, size: 20),
+                      label: const Text('Payments')),
+                  IconButton(onPressed: () => FirebaseAuth.instance.signOut(), icon: const Icon(Icons.logout, color: kMute)),
+                ]),
                 children: [
                   Seg(
                       items: ['Pending (${counts[0]})', 'Approved (${counts[1]})', 'Rejected (${counts[2]})'],
@@ -1091,6 +1445,11 @@ class _AdminPageState extends State<AdminPage> {
                         const SizedBox(height: 6),
                         Text('${d.data()['ownerName'] ?? ''}  ·  ${d.data()['ownerEmail'] ?? 'email nathi'}', style: const TextStyle(color: kMute)),
                         Text('${d.data()['tables'] ?? 10} tables  ·  ${fmtDate(d.data()['created'])}', style: const TextStyle(color: kMute, fontSize: 13)),
+                        if (keys[tab] != 'pending') ...[
+                          const SizedBox(height: 4),
+                          Text(planLeftText((d.data()['planEnd'] as Timestamp?)?.toDate()),
+                              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: planOk(d.data()) ? kOk : kBad)),
+                        ],
                         const SizedBox(height: 14),
                         Row(children: [
                           if (keys[tab] == 'pending') ...[
@@ -1098,7 +1457,11 @@ class _AdminPageState extends State<AdminPage> {
                             const SizedBox(width: 10),
                             btn('Approve', () => setStatus(d, 'approved')),
                           ],
-                          if (keys[tab] == 'approved') btn('Band karo', () => setStatus(d, 'rejected'), color: kBad, outline: true),
+                          if (keys[tab] == 'approved') ...[
+                            btn('Band karo', () => setStatus(d, 'rejected'), color: kBad, outline: true),
+                            const SizedBox(width: 10),
+                            btn('Plan apo (free)', () => grantPlan(d)),
+                          ],
                           if (keys[tab] == 'rejected') btn('Fari chalu karo', () => setStatus(d, 'approved')),
                         ]),
                       ]),
@@ -1336,6 +1699,45 @@ class _HomeState extends State<Home> {
     super.initState();
     cleanup();
     cleanTimer = Timer.periodic(const Duration(minutes: 3), (_) => cleanup());
+    WidgetsBinding.instance.addPostFrameCallback((_) => expiryPopup());
+  }
+
+  /// Plan puru thavama 2 divas ke ochha hoy to nanu popup.
+  void expiryPopup() {
+    if (!mounted) return;
+    final end = widget.c.planEnd;
+    if (end == null) return;
+    final left = end.difference(DateTime.now());
+    if (left.isNegative || left > const Duration(days: 2)) return;
+    final when = left.inHours < 24 ? '${max(1, left.inHours)} kalak ma' : '${left.inDays} divas ma';
+    final owner = widget.c.owner;
+    showDialog<void>(
+      context: context,
+      builder: (d) => AlertDialog(
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text('Plan puru thavama che', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+        content: Text(
+            'Tamaro plan $when puro thase. Plan puro thay pachi app band thai jase, etle pehla recharge karo.${owner ? '' : '\nOwner ne recharge karva kaho.'}',
+            style: const TextStyle(height: 1.4)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(d), child: const Text('Pachhi', style: TextStyle(color: kMute))),
+          if (owner)
+            FilledButton(
+              style: FilledButton.styleFrom(minimumSize: const Size(130, 44)),
+              onPressed: () {
+                Navigator.pop(d);
+                Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (_) => RechargePage(rid: widget.c.rid, shop: widget.c.name, isOwner: true, end: end, showBack: true)));
+              },
+              child: const Text('Recharge karo'),
+            ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -1422,7 +1824,6 @@ class TablesPage extends StatelessWidget {
           }
           final openTotal = by.values.fold<num>(0, (a, o) => a + orderTotal(o));
           final now = DateTime.now();
-          final today = Timestamp.fromDate(DateTime(now.year, now.month, now.day));
           return Pg(c.name, sub: 'Namaste, ${c.uname}', children: [
             Row(children: [
               stat(Icons.event_seat_outlined, 'Chalu tables', '${by.length} / ${c.tables}'),
@@ -1431,10 +1832,10 @@ class TablesPage extends StatelessWidget {
                 stat(Icons.shopping_bag_outlined, 'Chalu orders', rs(openTotal), tint: kOk, soft: kOkSoft)
               else
                 Expanded(
-                  child: StreamBuilder<QuerySnapshot<Json>>(
-                    stream: c.col('orders').where('paidTs', isGreaterThanOrEqualTo: today).snapshots(),
+                  child: StreamBuilder<DocumentSnapshot<Json>>(
+                    stream: c.col('stats').doc(dayKey(now)).snapshots(),
                     builder: (_, ps) {
-                      final sum = (ps.data?.docs ?? <QDoc>[]).fold<num>(0, (a, d) => a + orderTotal(d.data()));
+                      final sum = _n(ps.data?.data()?['sales']);
                       return Row(children: [stat(Icons.trending_up, 'Aaj nu vechan', rs(sum), tint: kOk, soft: kOkSoft)]);
                     },
                   ),
@@ -1743,6 +2144,7 @@ class BillsPage extends StatelessWidget {
       'by': c.uname,
     });
     batch.delete(d.reference);
+    batch.set(c.col('stats').doc(dayKey(DateTime.now())), statsData(o, mode), SetOptions(merge: true));
     final ok = await run(context, () => batch.commit(), queued: 'Bill close thayu (offline). Internet aave tyare sync thase');
     if (ok && context.mounted) {
       final paidO = <String, dynamic>{...o, 'pay': mode};
@@ -2218,31 +2620,39 @@ class _ReportPageState extends State<ReportPage> {
   Widget build(BuildContext context) {
     final c = widget.c;
     final f = Timestamp.fromDate(from());
+    final fk = dayKey(from());
     return StreamBuilder<QuerySnapshot<Json>>(
-      stream: c.col('orders').where('paidTs', isGreaterThanOrEqualTo: f).snapshots(),
+      stream: c.col('stats').where('day', isGreaterThanOrEqualTo: fk).snapshots(),
       builder: (_, os) => StreamBuilder<QuerySnapshot<Json>>(
         stream: c.col('expenses').where('ts', isGreaterThanOrEqualTo: f).snapshots(),
         builder: (_, es) {
-          final orders = os.data?.docs ?? <QDoc>[];
           final List<QDoc> exps = [...(es.data?.docs ?? <QDoc>[])]
             ..sort((a, b) => ((b['ts'] as Timestamp?)?.millisecondsSinceEpoch ?? 0)
                 .compareTo((a['ts'] as Timestamp?)?.millisecondsSinceEpoch ?? 0));
-          final sales = orders.fold<num>(0, (a, d) => a + orderTotal(d.data()));
-          final cost = orders.fold<num>(0, (a, d) => a + orderCost(d.data()));
-          final ex = exps.fold<num>(0, (a, d) => a + _n(d['amount']));
-          final profit = sales - cost - ex;
+          num sales = 0, cost = 0, bills = 0;
           final pays = <String, num>{'Cash': 0, 'UPI': 0, 'Card': 0};
           final top = <String, List<num>>{};
-          for (final d in orders) {
+          for (final d in os.data?.docs ?? <QDoc>[]) {
             final o = d.data();
-            final k = '${o['pay'] ?? 'Cash'}';
-            pays[k] = (pays[k] ?? 0) + orderTotal(o);
-            for (final g in grouped(o)) {
-              final t = top.putIfAbsent('${g['n']}', () => [0, 0]);
-              t[0] += _n(g['q']);
-              t[1] += _n(g['p']) * _n(g['q']);
+            sales += _n(o['sales']);
+            cost += _n(o['cost']);
+            bills += _n(o['bills']);
+            pays['Cash'] = (pays['Cash'] ?? 0) + _n(o['cash']);
+            pays['UPI'] = (pays['UPI'] ?? 0) + _n(o['upi']);
+            pays['Card'] = (pays['Card'] ?? 0) + _n(o['card']);
+            final it = o['items'];
+            if (it is Map) {
+              for (final e in it.values) {
+                if (e is Map) {
+                  final t = top.putIfAbsent('${e['n']}', () => [0, 0]);
+                  t[0] += _n(e['q']);
+                  t[1] += _n(e['r']);
+                }
+              }
             }
           }
+          final ex = exps.fold<num>(0, (a, d) => a + _n(d['amount']));
+          final profit = sales - cost - ex;
           final topList = top.entries.toList()..sort((a, b) => b.value[0].compareTo(a.value[0]));
           return Pg('Report', sub: 'Vechan, kharch ane profit', children: [
             Seg(items: const ['Aaj', '7 divas', 'Mahino', 'Badhu'], index: r, onChanged: (v) => setState(() => r = v)),
@@ -2253,7 +2663,7 @@ class _ReportPageState extends State<ReportPage> {
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
                   const Text('Net profit', style: TextStyle(color: Color(0xFF9CA3AF))),
-                  pill(sales > 0 ? '${(profit / sales * 100).toStringAsFixed(0)}% margin' : '${orders.length} bill',
+                  pill(sales > 0 ? '${(profit / sales * 100).toStringAsFixed(0)}% margin' : '${bills.toInt()} bill',
                       bg: profit >= 0 ? const Color(0xFF14532D) : const Color(0xFF7F1D1D),
                       fg: profit >= 0 ? const Color(0xFF86EFAC) : const Color(0xFFFCA5A5)),
                 ]),
@@ -2389,6 +2799,24 @@ class SettingsPage extends StatelessWidget {
         ]),
       ),
       if (c.owner) ...[
+        sectionTitle('Plan'),
+        Surface(
+          onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                  builder: (_) => RechargePage(rid: c.rid, shop: c.name, isOwner: true, end: c.planEnd, showBack: true))),
+          child: Row(children: [
+            const Icon(Icons.verified_outlined, color: kBrand),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Text('Mari subscription', style: TextStyle(fontWeight: FontWeight.w700)),
+                Text(planLeftText(c.planEnd), style: const TextStyle(color: kMute, fontSize: 13)),
+              ]),
+            ),
+            pill('Recharge'),
+          ]),
+        ),
         sectionTitle('Staff'),
         Surface(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
