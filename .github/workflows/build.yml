@@ -3,6 +3,8 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -30,15 +32,44 @@ jobs:
       - name: Disable Android lint (plugin lint crash fix)
         run: |
           mkdir -p ~/.gradle/init.d
-          cat > ~/.gradle/init.d/nolint.gradle <<'EOF'
+          cat > ~/.gradle/init.d/nolint.gradle <<'EOT'
           allprojects {
             tasks.configureEach { t ->
               if (t.name.startsWith('lint')) { t.enabled = false }
             }
           }
-          EOF
-      - run: flutter build apk --release
+          EOT
+      # Build number = GitHub run number (darek navi build ma vadhto) - app aa thi update shodhe che
+      - run: flutter build apk --release --build-number=${{ github.run_number }}
+      - name: Sign APK with permanent key
+        id: sign
+        env:
+          KS_B64: ${{ secrets.KEYSTORE_B64 }}
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          if [ -z "$KS_B64" ]; then
+            echo "Keystore secret nathi - debug sign vali APK banyu (in-app update nahi chale)"
+            exit 0
+          fi
+          echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          APKSIGNER="$(ls -d $ANDROID_HOME/build-tools/*/ | sort -V | tail -1)apksigner"
+          OUT=build/app/outputs/flutter-apk
+          "$APKSIGNER" sign --ks "$RUNNER_TEMP/release.jks" --ks-key-alias "$KS_ALIAS" --ks-pass env:KS_PASS --key-pass env:KS_PASS --out "$OUT/signed.apk" "$OUT/app-release.apk"
+          "$APKSIGNER" verify --print-certs "$OUT/signed.apk" | head -3
+          mv "$OUT/signed.apk" "$OUT/app-release.apk"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
           name: my-order-apk
           path: build/app/outputs/flutter-apk/app-release.apk
+      # Release banavo: app aa thi navo version shodhe ane download link male
+      - name: Publish release (in-app update mate)
+        if: steps.sign.outputs.signed == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: b${{ github.run_number }}
+          name: My Order build ${{ github.run_number }}
+          body: ${{ github.event.head_commit.message }}
+          files: build/app/outputs/flutter-apk/app-release.apk
+          make_latest: true
