@@ -123,7 +123,7 @@ String genCode() {
 }
 
 String billText(String shop, Json o) {
-  final b = StringBuffer('$shop\nTable ${o['table']}\n--------------------\n');
+  final b = StringBuffer('$shop\n${orderName(o)}\n--------------------\n');
   for (final g in grouped(o)) {
     b.writeln('${g['n']} x${g['q']}   ${rs(_n(g['p']) * _n(g['q']))}');
   }
@@ -280,6 +280,19 @@ String planLeftText(DateTime? end) {
   if (left.inDays >= 1) return 'Baki ${left.inDays} divas  ·  $date sudhi';
   return 'Baki ${max(1, left.inHours)} kalak';
 }
+
+/// Parcel (takeaway) order: table nathi hotu. Naam/label optional.
+bool isParcel(Json o) => '${o['type'] ?? ''}' == 'parcel';
+
+String orderName(Json o) {
+  if (!isParcel(o)) return 'Table ${o['table']}';
+  final l = '${o['label'] ?? ''}'.trim();
+  if (l.isNotEmpty) return 'Parcel  ·  $l';
+  final t = o['created'];
+  return t is Timestamp ? 'Parcel  ·  ${fmtTime(t.toDate())}' : 'Parcel';
+}
+
+String orderBadge(Json o) => isParcel(o) ? 'P' : 'T${o['table']}';
 
 String fmtTime(DateTime d) {
   final h = d.hour % 12 == 0 ? 12 : d.hour % 12;
@@ -582,7 +595,7 @@ class BillCard extends StatelessWidget {
         const SizedBox(height: 10),
         Text(shop, textAlign: TextAlign.center, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
         const SizedBox(height: 2),
-        Text('Table ${o['table']}  ·  ${when()}', textAlign: TextAlign.center, style: const TextStyle(color: kMute, fontSize: 12.5)),
+        Text('${orderName(o)}  ·  ${when()}', textAlign: TextAlign.center, style: const TextStyle(color: kMute, fontSize: 12.5)),
         dash(),
         cols('Item', 'Qty', 'Rate', 'Rakam', head: true),
         for (final g in items) cols('${g['n']}', '${_n(g['q']).toInt()}', rs(_n(g['p'])), rs(_n(g['p']) * _n(g['q']))),
@@ -1819,10 +1832,18 @@ class TablesPage extends StatelessWidget {
         stream: c.col('orders').where('status', isEqualTo: 'open').snapshots(),
         builder: (_, s) {
           final by = <int, Json>{};
+          final List<QDoc> parcels = [];
           for (final d in s.data?.docs ?? <QDoc>[]) {
-            by[_n(d.data()['table']).toInt()] = d.data();
+            if (isParcel(d.data())) {
+              parcels.add(d);
+            } else {
+              by[_n(d.data()['table']).toInt()] = d.data();
+            }
           }
-          final openTotal = by.values.fold<num>(0, (a, o) => a + orderTotal(o));
+          parcels.sort((a, b) => ((a.data()['created'] as Timestamp?)?.millisecondsSinceEpoch ?? 9007199254740000)
+              .compareTo((b.data()['created'] as Timestamp?)?.millisecondsSinceEpoch ?? 9007199254740000));
+          final openTotal = by.values.fold<num>(0, (a, o) => a + orderTotal(o)) +
+              parcels.fold<num>(0, (a, d) => a + orderTotal(d.data()));
           final now = DateTime.now();
           return Pg(c.name, sub: 'Namaste, ${c.uname}', children: [
             Row(children: [
@@ -1841,6 +1862,36 @@ class TablesPage extends StatelessWidget {
                   ),
                 ),
             ]),
+            sectionTitle('Parcel (takeaway)'),
+            FilledButton.icon(
+              onPressed: () => newParcel(context),
+              icon: const Icon(Icons.takeout_dining_outlined),
+              label: const Text('Navu parcel order'),
+            ),
+            const SizedBox(height: 10),
+            for (final d in parcels)
+              Surface(
+                margin: const EdgeInsets.only(bottom: 10),
+                color: kBrandSoft,
+                border: kBrandLine,
+                padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+                onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (_) => OrderPage(
+                            c: c, table: 0, parcel: true, orderId: d.id, label: '${d.data()['label'] ?? ''}'))),
+                child: Row(children: [
+                  const Icon(Icons.takeout_dining_outlined, color: kBrand),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text(orderName(d.data()), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16)),
+                      Text('${grouped(d.data()).length} item', style: const TextStyle(color: kMute, fontSize: 12.5)),
+                    ]),
+                  ),
+                  Text(rs(orderTotal(d.data())), style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16, color: kBrand)),
+                ]),
+              ),
             sectionTitle('Tables'),
             GridView.count(
               crossAxisCount: 3,
@@ -1854,6 +1905,16 @@ class TablesPage extends StatelessWidget {
           ]);
         },
       );
+
+  Future<void> newParcel(BuildContext context) async {
+    final v = await askForm(context, 'Navu parcel', ['Customer nu naam (optional)']);
+    if (v == null || !context.mounted) return;
+    Navigator.push(
+        context,
+        MaterialPageRoute(
+            builder: (_) => OrderPage(
+                c: c, table: 0, parcel: true, orderId: 'parcel_${DateTime.now().microsecondsSinceEpoch}', label: v[0])));
+  }
 
   Widget tile(BuildContext context, int t, Json? o) {
     final open = o != null;
@@ -1880,7 +1941,10 @@ class TablesPage extends StatelessWidget {
 class OrderPage extends StatefulWidget {
   final Ctx c;
   final int table;
-  const OrderPage({required this.c, required this.table, super.key});
+  final bool parcel;
+  final String? orderId;
+  final String label;
+  const OrderPage({required this.c, required this.table, this.parcel = false, this.orderId, this.label = '', super.key});
   @override
   State<OrderPage> createState() => _OrderPageState();
 }
@@ -1890,7 +1954,9 @@ class _OrderPageState extends State<OrderPage> {
   String q = '', cat = '';
   bool busy = false;
 
-  Future<void> save(List<QDoc> menu) async {
+  String get docId => widget.orderId ?? 'open_${widget.table}';
+
+  Future<void> save(List<QDoc> menu, bool isNew) async {
     final adds = <Json>[];
     for (final m in menu) {
       final n = qty[m.id] ?? 0;
@@ -1908,11 +1974,14 @@ class _OrderPageState extends State<OrderPage> {
     if (adds.isEmpty) return;
     setState(() => busy = true);
     final c = widget.c;
-    final ref = c.col('orders').doc('open_${widget.table}');
+    final ref = c.col('orders').doc(docId);
     final ok = await run(
         context,
         () => ref.set({
-              'table': widget.table,
+              'table': widget.parcel ? 0 : widget.table,
+              'type': widget.parcel ? 'parcel' : 'table',
+              if (widget.parcel) 'label': widget.label.trim(),
+              if (widget.parcel && isNew) 'created': FieldValue.serverTimestamp(),
               'status': 'open',
               'items': FieldValue.arrayUnion(adds),
               'by': c.uname,
@@ -1946,9 +2015,9 @@ class _OrderPageState extends State<OrderPage> {
   Widget build(BuildContext context) {
     final c = widget.c;
     return Scaffold(
-      appBar: AppBar(title: Text('Table ${widget.table}')),
+      appBar: AppBar(title: Text(widget.parcel ? (widget.label.trim().isEmpty ? 'Parcel' : 'Parcel  ·  ${widget.label.trim()}') : 'Table ${widget.table}')),
       body: StreamBuilder<DocumentSnapshot<Json>>(
-        stream: c.col('orders').doc('open_${widget.table}').snapshots(),
+        stream: c.col('orders').doc(docId).snapshots(),
         builder: (_, os) => StreamBuilder<QuerySnapshot<Json>>(
           stream: c.col('menu').snapshots(),
           builder: (_, ms) {
@@ -2066,7 +2135,7 @@ class _OrderPageState extends State<OrderPage> {
                     const SizedBox(width: 20),
                     Expanded(
                       child: FilledButton(
-                          onPressed: (busy || count == 0) ? null : () => save(menu),
+                          onPressed: (busy || count == 0) ? null : () => save(menu, cur == null),
                           child: busy
                               ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5, color: Colors.white))
                               : const Text('Order save karo')),
@@ -2135,6 +2204,9 @@ class BillsPage extends StatelessWidget {
     final batch = db.batch();
     batch.set(c.col('orders').doc(), {
       'table': o['table'],
+      'type': o['type'] ?? 'table',
+      'label': o['label'] ?? '',
+      'created': o['created'],
       'status': 'paid',
       'items': o['items'],
       'paidTs': FieldValue.serverTimestamp(),
@@ -2148,7 +2220,7 @@ class BillsPage extends StatelessWidget {
     final ok = await run(context, () => batch.commit(), queued: 'Bill close thayu (offline). Internet aave tyare sync thase');
     if (ok && context.mounted) {
       final paidO = <String, dynamic>{...o, 'pay': mode};
-      toast(context, 'Table ${o['table']} nu bill ${rs(orderTotal(o))} ($mode) close thayu',
+      toast(context, '${orderName(o)} nu bill ${rs(orderTotal(o))} ($mode) close thayu',
           action: 'Bill moklo', onAction: () {
         if (context.mounted) showBill(context, c.name, paidO, pay: mode, auto: true);
       });
@@ -2160,7 +2232,7 @@ class BillsPage extends StatelessWidget {
         stream: c.col('orders').where('status', isEqualTo: 'open').snapshots(),
         builder: (_, s) {
           final List<QDoc> docs = [...(s.data?.docs ?? <QDoc>[])]
-            ..sort((a, b) => _n(a['table']).compareTo(_n(b['table'])));
+            ..sort((a, b) => (isParcel(a.data()) ? 1000 : _n(a['table'])).compareTo(isParcel(b.data()) ? 1000 : _n(b['table'])));
           return Pg('Bills',
               sub: '${docs.length} chalu bill',
               trailing: TextButton.icon(
@@ -2178,9 +2250,9 @@ class BillsPage extends StatelessWidget {
                       Container(
                           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                           decoration: BoxDecoration(color: kBrandSoft, borderRadius: BorderRadius.circular(10)),
-                          child: Text('T${d['table']}', style: const TextStyle(color: kBrand, fontWeight: FontWeight.w800))),
+                          child: Text(orderBadge(d.data()), style: const TextStyle(color: kBrand, fontWeight: FontWeight.w800))),
                       const SizedBox(width: 10),
-                      Text('Table ${d['table']}', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+                      Flexible(child: Text(orderName(d.data()), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800))),
                     ]),
                     Text(rs(orderTotal(d.data())), style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
                   ]),
@@ -2296,7 +2368,7 @@ class _HistoryPageState extends State<HistoryPage> {
                     margin: const EdgeInsets.only(bottom: 10),
                     child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                       Row(children: [
-                        Text('Table ${e.value['table']}', style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
+                        Flexible(child: Text(orderName(e.value.data()), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800))),
                         const SizedBox(width: 8),
                         pill('${e.value.data()['pay'] ?? 'Cash'}', bg: kOkSoft, fg: kOk),
                         const Spacer(),
