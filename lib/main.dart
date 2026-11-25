@@ -12,7 +12,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -23,6 +25,9 @@ typedef Json = Map<String, dynamic>;
 typedef QDoc = QueryDocumentSnapshot<Map<String, dynamic>>;
 
 final db = FirebaseFirestore.instance;
+
+/// GitHub repository (update shodhva mate). Repo Public hovi joie.
+const kRepo = 'gohilyashm2007-glitch/my-order';
 
 const kInk = Color(0xFF111827);
 const kMute = Color(0xFF6B7280);
@@ -293,6 +298,65 @@ String orderName(Json o) {
 }
 
 String orderBadge(Json o) => isParcel(o) ? 'P' : 'T${o['table']}';
+
+class AppUpdate {
+  final int latest, current;
+  final String url;
+  const AppUpdate(this.latest, this.current, this.url);
+  bool get isNew => latest > current;
+}
+
+/// GitHub ni chhelli release sathe app nu build number sarkhavo.
+Future<AppUpdate?> checkAppUpdate() async {
+  if (kIsWeb) return null;
+  try {
+    final info = await PackageInfo.fromPlatform();
+    final cur = int.tryParse(info.buildNumber) ?? 0;
+    final r = await http
+        .get(Uri.parse('https://api.github.com/repos/$kRepo/releases/latest'),
+            headers: {'Accept': 'application/vnd.github+json'})
+        .timeout(const Duration(seconds: 8));
+    if (r.statusCode != 200) return null;
+    final j = jsonDecode(r.body) as Map<String, dynamic>;
+    final latest = int.tryParse('${j['tag_name'] ?? ''}'.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
+    var url = 'https://github.com/$kRepo/releases/latest/download/app-release.apk';
+    for (final a in (j['assets'] as List? ?? [])) {
+      if (a is Map && '${a['name']}'.endsWith('.apk')) {
+        url = '${a['browser_download_url']}';
+        break;
+      }
+    }
+    return AppUpdate(latest, cur, url);
+  } catch (_) {
+    return null;
+  }
+}
+
+Future<void> showUpdateDialog(BuildContext context, AppUpdate u) => showDialog<void>(
+      context: context,
+      builder: (d) => AlertDialog(
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text('Navo update aavyo che', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+        content: const Text(
+            'App no navo version taiyar che, ema navi suvidhao ane sudharao chhe.\n\nUpdate karo dabavo. File download thay pachi notification (ke Downloads) mathi te par dabavi ne Install karo. Tamaro data surakshit rahese.',
+            style: TextStyle(height: 1.4)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(d), child: const Text('Pachhi', style: TextStyle(color: kMute))),
+          FilledButton(
+            style: FilledButton.styleFrom(minimumSize: const Size(130, 44)),
+            onPressed: () async {
+              Navigator.pop(d);
+              try {
+                await launchUrl(Uri.parse(u.url), mode: LaunchMode.externalApplication);
+              } catch (_) {}
+            },
+            child: const Text('Update karo'),
+          ),
+        ],
+      ),
+    );
 
 String fmtTime(DateTime d) {
   final h = d.hour % 12 == 0 ? 12 : d.hour % 12;
@@ -1713,6 +1777,14 @@ class _HomeState extends State<Home> {
     cleanup();
     cleanTimer = Timer.periodic(const Duration(minutes: 3), (_) => cleanup());
     WidgetsBinding.instance.addPostFrameCallback((_) => expiryPopup());
+    Future.delayed(const Duration(seconds: 2), updateCheck);
+  }
+
+  /// App khule tyare navo version hoy to update batave.
+  Future<void> updateCheck() async {
+    final u = await checkAppUpdate();
+    if (u == null || !u.isNew || !mounted) return;
+    showUpdateDialog(context, u);
   }
 
   /// Plan puru thavama 2 divas ke ochha hoy to nanu popup.
@@ -2824,6 +2896,198 @@ class _ReportPageState extends State<ReportPage> {
   }
 }
 
+// ---------------- APP VERSION / UPDATE ----------------
+class VersionCard extends StatefulWidget {
+  const VersionCard({super.key});
+  @override
+  State<VersionCard> createState() => _VersionCardState();
+}
+
+class _VersionCardState extends State<VersionCard> {
+  String ver = '';
+  bool busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (!kIsWeb) {
+      PackageInfo.fromPlatform().then((i) {
+        if (mounted) setState(() => ver = 'v${i.version}  (build ${i.buildNumber})');
+      }).catchError((_) {});
+    }
+  }
+
+  Future<void> check() async {
+    setState(() => busy = true);
+    final u = await checkAppUpdate();
+    if (!mounted) return;
+    setState(() => busy = false);
+    if (u == null) {
+      toast(context, 'Update check na thayu. Internet check karo.', err: true);
+    } else if (u.isNew) {
+      showUpdateDialog(context, u);
+    } else {
+      toast(context, 'Tame latest version par cho');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Surface(
+        onTap: kIsWeb || busy ? null : check,
+        child: Row(children: [
+          const Icon(Icons.system_update_outlined, color: kBrand),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('My Order', style: TextStyle(fontWeight: FontWeight.w700)),
+              Text(kIsWeb ? 'Web version' : (ver.isEmpty ? '...' : ver), style: const TextStyle(color: kMute, fontSize: 13)),
+            ]),
+          ),
+          if (!kIsWeb)
+            busy
+                ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.5, color: kBrand))
+                : pill('Update check'),
+        ]),
+      );
+}
+
+// ---------------- PROFILE ----------------
+class ProfilePage extends StatefulWidget {
+  final Ctx c;
+  const ProfilePage({required this.c, super.key});
+  @override
+  State<ProfilePage> createState() => _ProfilePageState();
+}
+
+class _ProfilePageState extends State<ProfilePage> {
+  late final TextEditingController nm = TextEditingController(text: widget.c.uname);
+  final op = TextEditingController(), np = TextEditingController(), cp = TextEditingController();
+  bool busyName = false, busyPass = false;
+
+  String passMsg(String code) {
+    switch (code) {
+      case 'wrong-password':
+      case 'invalid-credential':
+        return 'Jūnu password khotu che';
+      case 'weak-password':
+        return 'Navo password ochha ma ochha 6 akshar no rakho';
+      case 'too-many-requests':
+        return 'Ghana prayatno thaya, thodi var pachi try karo';
+      case 'requires-recent-login':
+        return 'Fari login karine try karo';
+      case 'network-request-failed':
+        return 'Internet check karo';
+      default:
+        return 'Error: $code';
+    }
+  }
+
+  Future<void> saveName() async {
+    final name = nm.text.trim();
+    final u = FirebaseAuth.instance.currentUser;
+    if (name.isEmpty || u == null) {
+      toast(context, 'Tamaru naam nakho', err: true);
+      return;
+    }
+    setState(() => busyName = true);
+    final ok = await run(context, () => db.collection('users').doc(u.uid).update({'name': name}));
+    try {
+      await u.updateDisplayName(name);
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() => busyName = false);
+    if (ok) toast(context, 'Naam badlai gayu');
+  }
+
+  Future<void> changePass() async {
+    final u = FirebaseAuth.instance.currentUser;
+    final email = u?.email;
+    if (u == null || email == null) return;
+    if (op.text.isEmpty) {
+      toast(context, 'Jūnu password nakho', err: true);
+      return;
+    }
+    if (np.text.length < 6) {
+      toast(context, 'Navo password ochha ma ochha 6 akshar no rakho', err: true);
+      return;
+    }
+    if (np.text != cp.text) {
+      toast(context, 'Navo password ane fari lakhelu same nathi', err: true);
+      return;
+    }
+    setState(() => busyPass = true);
+    try {
+      await u.reauthenticateWithCredential(EmailAuthProvider.credential(email: email, password: op.text));
+      await u.updatePassword(np.text);
+      op.clear();
+      np.clear();
+      cp.clear();
+      if (mounted) toast(context, 'Password badlai gayo');
+    } on FirebaseAuthException catch (e) {
+      if (mounted) toast(context, passMsg(e.code), err: true);
+    } catch (e) {
+      if (mounted) toast(context, 'Error: $e', err: true);
+    }
+    if (mounted) setState(() => busyPass = false);
+  }
+
+  Widget field(TextEditingController c, String hint, IconData icon, {bool pass = false}) => Padding(
+        padding: const EdgeInsets.only(bottom: 10),
+        child: TextField(
+          controller: c,
+          obscureText: pass,
+          decoration: InputDecoration(hintText: hint, prefixIcon: Icon(icon, color: kMute, size: 20)),
+        ),
+      );
+
+  Widget spin() => const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5, color: Colors.white));
+
+  @override
+  Widget build(BuildContext context) {
+    final u = FirebaseAuth.instance.currentUser;
+    final c = widget.c;
+    final ini = c.uname.trim().isEmpty ? '?' : c.uname.trim()[0].toUpperCase();
+    return Scaffold(
+      appBar: AppBar(title: const Text('Profile')),
+      body: ListView(
+        physics: const BouncingScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 28),
+        children: [
+          Center(
+            child: Container(
+              width: 76,
+              height: 76,
+              alignment: Alignment.center,
+              decoration: const BoxDecoration(color: kBrandSoft, shape: BoxShape.circle),
+              child: Text(ini, style: const TextStyle(color: kBrand, fontSize: 32, fontWeight: FontWeight.w800)),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Center(child: Text(c.uname, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800))),
+          Center(child: Text('${c.roleLabel}  ·  ${c.name}', style: const TextStyle(color: kMute))),
+          sectionTitle('Email'),
+          Surface(
+            child: Row(children: [
+              const Icon(Icons.mail_outline, color: kMute),
+              const SizedBox(width: 12),
+              Expanded(child: Text(u?.email ?? '', style: const TextStyle(fontWeight: FontWeight.w600))),
+              if (u?.emailVerified ?? false) pill('Verified', bg: kOkSoft, fg: kOk),
+            ]),
+          ),
+          sectionTitle('Naam'),
+          field(nm, 'Tamaru naam', Icons.person_outline),
+          FilledButton(onPressed: busyName ? null : saveName, child: busyName ? spin() : const Text('Naam save karo')),
+          sectionTitle('Password badlo'),
+          field(op, 'Jūnu password', Icons.lock_outline, pass: true),
+          field(np, 'Navu password', Icons.lock_reset, pass: true),
+          field(cp, 'Navu password fari lakho', Icons.lock_reset, pass: true),
+          FilledButton(onPressed: busyPass ? null : changePass, child: busyPass ? spin() : const Text('Password badlo')),
+        ],
+      ),
+    );
+  }
+}
+
 // ---------------- SETTINGS ----------------
 class SettingsPage extends StatelessWidget {
   final Ctx c;
@@ -2852,6 +3116,7 @@ class SettingsPage extends StatelessWidget {
     final ini = c.uname.trim().isEmpty ? '?' : c.uname.trim()[0].toUpperCase();
     return Pg('Settings', children: [
       Surface(
+        onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => ProfilePage(c: c))),
         child: Row(children: [
           Container(
               width: 54,
@@ -2868,6 +3133,7 @@ class SettingsPage extends StatelessWidget {
               pill(c.roleLabel),
             ]),
           ),
+          const Icon(Icons.chevron_right, color: kMute),
         ]),
       ),
       if (c.owner) ...[
@@ -2917,6 +3183,8 @@ class SettingsPage extends StatelessWidget {
           ]),
         ),
       ],
+      sectionTitle('App'),
+      const VersionCard(),
       const SizedBox(height: 18),
       OutlinedButton.icon(
         style: OutlinedButton.styleFrom(
@@ -2931,8 +3199,6 @@ class SettingsPage extends StatelessWidget {
         icon: const Icon(Icons.logout, size: 20),
         label: const Text('Logout', style: TextStyle(fontWeight: FontWeight.w700)),
       ),
-      const SizedBox(height: 16),
-      const Center(child: Text('My Order  ·  v1.1', style: TextStyle(color: kMute, fontSize: 12))),
     ]);
   }
 }
