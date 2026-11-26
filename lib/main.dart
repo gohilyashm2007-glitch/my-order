@@ -251,16 +251,32 @@ Json statsData(Json o, String mode) {
 
 class Plan {
   final String id, label;
-  final int months, days, price;
-  const Plan(this.id, this.label, this.months, this.days, this.price);
+  final int days, price;
+  const Plan(this.id, this.label, this.days, this.price);
+  factory Plan.fromDoc(String id, Json m) => Plan(id, '${m['name'] ?? id}', _n(m['days']).toInt(), _n(m['price']).toInt());
 }
 
+/// Default plans (jyare admin e haji koi plan banavya na hoy tyare vaprashe).
 const kPlans = [
-  Plan('m1', '1 Mahino', 1, 30, 499),
-  Plan('m3', '3 Mahina', 3, 90, 1399),
-  Plan('m6', '6 Mahina', 6, 180, 2699),
-  Plan('m12', '12 Mahina', 12, 365, 5299),
+  Plan('m1', '1 Mahino', 30, 499),
+  Plan('m3', '3 Mahina', 90, 1399),
+  Plan('m6', '6 Mahina', 180, 2699),
+  Plan('m12', '12 Mahina', 365, 5299),
 ];
+
+/// Plan ni chhelli tarikh = plan (planEnd) ane free trial (created + trialDays) mathi je moti hoy te.
+DateTime? effectiveEnd(Json r) {
+  final pe = r['planEnd'];
+  DateTime? end = pe is Timestamp ? pe.toDate() : null;
+  final td = _n(r['trialDays']).toInt();
+  if (td > 0) {
+    final cr = r['created'];
+    final base = cr is Timestamp ? cr.toDate() : DateTime.now();
+    final te = base.add(Duration(days: td));
+    if (end == null || te.isAfter(end)) end = te;
+  }
+  return end;
+}
 
 class Grant {
   final String label;
@@ -803,10 +819,7 @@ class Ctx {
   bool get owner => role == 'owner';
   String get roleLabel => {'owner': 'Owner', 'waiter': 'Order lenar', 'cashier': 'Bill counter'}[role] ?? role;
   List<String> get sections => [for (final e in (r['sections'] ?? []) as List) '$e'];
-  DateTime? get planEnd {
-    final v = r['planEnd'];
-    return v is Timestamp ? v.toDate() : null;
-  }
+  DateTime? get planEnd => effectiveEnd(r);
 }
 
 class MyOrderApp extends StatelessWidget {
@@ -1040,8 +1053,7 @@ class _GateState extends State<Gate> {
                   timer?.cancel();
                   final st = '${rd['status'] ?? ''}';
                   if (st != 'approved') return PendingPage(name: '${rd['name'] ?? ''}', status: st);
-                  final pe = rd['planEnd'];
-                  final end = pe is Timestamp ? pe.toDate() : null;
+                  final end = effectiveEnd(rd);
                   if (end == null || !end.isAfter(DateTime.now())) {
                     return RechargePage(rid: rid, shop: '${rd['name'] ?? ''}', isOwner: ud['role'] == 'owner', end: end);
                   }
@@ -1175,11 +1187,11 @@ class PendingPage extends StatelessWidget {
               child: Icon(rej ? Icons.block : Icons.hourglass_top, color: kBrand, size: 34),
             ),
             const SizedBox(height: 22),
-            Text(rej ? 'Approve thayu nathi' : 'Approval baki che', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+            Text(rej ? 'Account band che' : 'Approval baki che', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
             const SizedBox(height: 8),
             Text(
                 rej
-                    ? '"$name" ne admin e approve karyu nathi. Madad mate admin no sampark karo.'
+                    ? '"$name" no account admin e band karyo che. Madad mate admin no sampark karo.'
                     : '"$name" admin approve kare tyare app potani jate chalu thase. Aa screen khuli rakhi shako.',
                 textAlign: TextAlign.center,
                 style: const TextStyle(color: kMute, height: 1.4)),
@@ -1261,24 +1273,46 @@ class _RechargePageState extends State<RechargePage> {
                     style: TextStyle(height: 1.4)),
               ),
             if (widget.isOwner)
-              for (final p in kPlans)
-                Surface(
-                  margin: const EdgeInsets.only(bottom: 12),
-                  onTap: () => pay(p),
-                  child: Row(children: [
-                    Expanded(
-                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Text(p.label, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
-                        const SizedBox(height: 2),
-                        Text('${rs((p.price / p.months).round())} / mahino', style: const TextStyle(color: kMute, fontSize: 13)),
-                      ]),
-                    ),
-                    Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                      Text(rs(p.price), style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
-                      if (499 * p.months - p.price > 0) pill('Bachat ${rs(499 * p.months - p.price)}', bg: kOkSoft, fg: kOk),
-                    ]),
-                  ]),
-                ),
+              StreamBuilder<QuerySnapshot<Json>>(
+                stream: db.collection('plans').snapshots(),
+                builder: (_, ps) {
+                  var plans = <Plan>[
+                    for (final d in ps.data?.docs ?? <QDoc>[])
+                      if (d.data()['active'] != false) Plan.fromDoc(d.id, d.data())
+                  ].where((p) => p.price > 0 && p.days > 0).toList();
+                  if (ps.hasError || (ps.data?.docs.isEmpty ?? true)) plans = [...kPlans];
+                  plans.sort((a, b) => a.days != b.days ? a.days.compareTo(b.days) : a.price.compareTo(b.price));
+                  Plan? base;
+                  for (final p in plans) {
+                    if (p.days == 30 && (base == null || p.price < base.price)) base = p;
+                  }
+                  if (plans.isEmpty) {
+                    return const Surface(child: Text('Haji koi plan upalabdh nathi. Admin no sampark karo.'));
+                  }
+                  return Column(children: [
+                    for (final p in plans)
+                      Surface(
+                        margin: const EdgeInsets.only(bottom: 12),
+                        onTap: () => pay(p),
+                        child: Row(children: [
+                          Expanded(
+                            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                              Text(p.label, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+                              const SizedBox(height: 2),
+                              Text('${p.days} divas  ·  ${rs((p.price * 30 / p.days).round())} / mahino',
+                                  style: const TextStyle(color: kMute, fontSize: 13)),
+                            ]),
+                          ),
+                          Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                            Text(rs(p.price), style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
+                            if (base != null && !identical(p, base) && (base.price * p.days / 30).round() - p.price > 0)
+                              pill('Bachat ${rs((base.price * p.days / 30).round() - p.price)}', bg: kOkSoft, fg: kOk),
+                          ]),
+                        ]),
+                      ),
+                  ]);
+                },
+              ),
             if (opened)
               Surface(
                 color: kOkSoft,
@@ -1306,6 +1340,103 @@ class _RechargePageState extends State<RechargePage> {
       ),
     );
   }
+}
+
+// ---------------- ADMIN: PLANS ----------------
+class PlansPage extends StatelessWidget {
+  const PlansPage({super.key});
+
+  Future<void> edit(BuildContext context, QDoc? d) async {
+    final m = d?.data();
+    final v = await askForm(context, d == null ? 'Navo plan' : 'Plan badlo',
+        ['Plan nu naam (jem ke 1 Mahino)', 'Price (₹)', 'Divas (jem ke 30)'],
+        init: m == null ? null : ['${m['name']}', '${_n(m['price']).toInt()}', '${_n(m['days']).toInt()}'], numeric: {1, 2});
+    if (v == null || !context.mounted) return;
+    final price = int.tryParse(v[1]) ?? 0;
+    final days = int.tryParse(v[2]) ?? 0;
+    if (v[0].isEmpty || price <= 0 || days <= 0 || days > 3650) {
+      toast(context, 'Naam, price ane divas (1 thi 3650) barobar nakho', err: true);
+      return;
+    }
+    final data = {'name': v[0], 'price': price, 'days': days};
+    await run(context, () => d == null ? db.collection('plans').add({...data, 'active': true}) : d.reference.update(data));
+  }
+
+  Future<void> seedDefaults(BuildContext context) async {
+    final b = db.batch();
+    for (final p in kPlans) {
+      b.set(db.collection('plans').doc(p.id), {'name': p.label, 'price': p.price, 'days': p.days, 'active': true});
+    }
+    await run(context, () => b.commit());
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: const Text('Plans')),
+        body: StreamBuilder<QuerySnapshot<Json>>(
+          stream: db.collection('plans').snapshots(),
+          builder: (_, s) {
+            if (s.hasError) return Center(child: Text('Error: ${errText(s.error)}'));
+            final List<QDoc> docs = [...(s.data?.docs ?? <QDoc>[])]
+              ..sort((a, b) => _n(a.data()['days']).compareTo(_n(b.data()['days'])));
+            return ListView(
+              physics: const BouncingScrollPhysics(),
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+              children: [
+                FilledButton.icon(onPressed: () => edit(context, null), icon: const Icon(Icons.add), label: const Text('Navo plan')),
+                const SizedBox(height: 12),
+                const Surface(
+                  color: kBrandSoft,
+                  border: kBrandLine,
+                  child: Text(
+                      'Price badlo to navi kharidi mate lagu thase. Je restaurants no plan chalu chhe te badlay nahi. "Chalu" band karo to te plan owner ne dekhase nahi.',
+                      style: TextStyle(fontSize: 13, height: 1.4)),
+                ),
+                const SizedBox(height: 12),
+                if (docs.isEmpty) ...[
+                  empty(Icons.sell_outlined, 'Haji tame koi plan banavya nathi.\nAtyare app default 4 plan (₹499, ₹1,399, ₹2,699, ₹5,299) batave chhe.'),
+                  OutlinedButton(
+                    style: OutlinedButton.styleFrom(
+                        minimumSize: const Size.fromHeight(48),
+                        side: const BorderSide(color: kLine),
+                        backgroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))),
+                    onPressed: () => seedDefaults(context),
+                    child: const Text('Default 4 plan edit karva mate banavo', style: TextStyle(fontWeight: FontWeight.w700)),
+                  ),
+                ],
+                for (final d in docs)
+                  Surface(
+                    margin: const EdgeInsets.only(bottom: 10),
+                    padding: const EdgeInsets.fromLTRB(16, 10, 6, 10),
+                    onTap: () => edit(context, d),
+                    child: Row(children: [
+                      Expanded(
+                        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Text('${d.data()['name']}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+                          Text('${rs(_n(d.data()['price']))}  ·  ${_n(d.data()['days']).toInt()} divas',
+                              style: const TextStyle(color: kMute, fontSize: 13)),
+                        ]),
+                      ),
+                      Switch(
+                        value: d.data()['active'] != false,
+                        onChanged: (v) => run(context, () => d.reference.update({'active': v})),
+                      ),
+                      IconButton(
+                        onPressed: () async {
+                          if (await confirm(context, '${d.data()['name']} delete karvo?', yes: 'Delete')) {
+                            if (context.mounted) await run(context, () => d.reference.delete());
+                          }
+                        },
+                        icon: const Icon(Icons.delete_outline, color: kBad),
+                      ),
+                    ]),
+                  ),
+              ],
+            );
+          },
+        ),
+      );
 }
 
 // ---------------- ADMIN: PAYMENTS ----------------
@@ -1425,7 +1556,7 @@ class _AdminPageState extends State<AdminPage> {
   }
 
   bool planOk(Json o) {
-    final e = (o['planEnd'] as Timestamp?)?.toDate();
+    final e = effectiveEnd(o);
     return e != null && e.isAfter(DateTime.now());
   }
 
@@ -1443,7 +1574,7 @@ class _AdminPageState extends State<AdminPage> {
           child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text('${o['name']} ne free plan apo', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
             const SizedBox(height: 2),
-            Text(planLeftText((o['planEnd'] as Timestamp?)?.toDate()), style: const TextStyle(color: kMute)),
+            Text(planLeftText(effectiveEnd(o)), style: const TextStyle(color: kMute)),
             const SizedBox(height: 16),
             for (final gr in kGrants)
               Surface(
@@ -1461,7 +1592,7 @@ class _AdminPageState extends State<AdminPage> {
     );
     if (g == null || !mounted) return;
     final now = DateTime.now();
-    final cur = (o['planEnd'] as Timestamp?)?.toDate();
+    final cur = effectiveEnd(o);
     final base = (cur != null && cur.isAfter(now)) ? cur : now;
     final end = base.add(Duration(days: g.days));
     final batch = db.batch();
@@ -1496,14 +1627,38 @@ class _AdminPageState extends State<AdminPage> {
                   .compareTo((a.data()['created'] as Timestamp?)?.millisecondsSinceEpoch ?? 0));
             return Pg('Admin panel',
                 sub: 'Restaurant approval',
-                trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-                  TextButton.icon(
-                      onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const PaymentsPage())),
-                      icon: const Icon(Icons.account_balance_wallet_outlined, size: 20),
-                      label: const Text('Payments')),
-                  IconButton(onPressed: () => FirebaseAuth.instance.signOut(), icon: const Icon(Icons.logout, color: kMute)),
-                ]),
+                trailing: IconButton(onPressed: () => FirebaseAuth.instance.signOut(), icon: const Icon(Icons.logout, color: kMute)),
                 children: [
+                  Row(children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                            minimumSize: const Size.fromHeight(46),
+                            foregroundColor: kInk,
+                            side: const BorderSide(color: kLine),
+                            backgroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+                        onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const PaymentsPage())),
+                        icon: const Icon(Icons.account_balance_wallet_outlined, size: 20, color: kBrand),
+                        label: const Text('Payments', style: TextStyle(fontWeight: FontWeight.w700)),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                            minimumSize: const Size.fromHeight(46),
+                            foregroundColor: kInk,
+                            side: const BorderSide(color: kLine),
+                            backgroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+                        onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const PlansPage())),
+                        icon: const Icon(Icons.sell_outlined, size: 20, color: kBrand),
+                        label: const Text('Plans', style: TextStyle(fontWeight: FontWeight.w700)),
+                      ),
+                    ),
+                  ]),
+                  const SizedBox(height: 14),
                   Seg(
                       items: ['Pending (${counts[0]})', 'Approved (${counts[1]})', 'Rejected (${counts[2]})'],
                       index: tab,
@@ -1524,7 +1679,7 @@ class _AdminPageState extends State<AdminPage> {
                         Text('${d.data()['tables'] ?? 10} tables  ·  ${fmtDate(d.data()['created'])}', style: const TextStyle(color: kMute, fontSize: 13)),
                         if (keys[tab] != 'pending') ...[
                           const SizedBox(height: 4),
-                          Text(planLeftText((d.data()['planEnd'] as Timestamp?)?.toDate()),
+                          Text(planLeftText(effectiveEnd(d.data())),
                               style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: planOk(d.data()) ? kOk : kBad)),
                         ],
                         const SizedBox(height: 14),
@@ -1632,7 +1787,8 @@ class _AuthPageState extends State<AuthPage> {
               'name': rn.text.trim(),
               'ownerUid': uid,
               'tables': 10,
-              'status': 'pending',
+              'status': 'approved',
+              'trialDays': 7,
               'ownerName': nm.text.trim(),
               'ownerEmail': email,
               'waiterCode': wc,
@@ -1715,7 +1871,7 @@ class _AuthPageState extends State<AuthPage> {
                   mode == 0
                       ? 'Tamara account thi login karo.'
                       : mode == 1
-                          ? 'Owner account ek var banavo, pachi staff ne code aapo.'
+                          ? 'Owner account ek var banavo. 7 divas nu free trial malshe.'
                           : 'Owner e aapelo code nakho.',
                   style: const TextStyle(color: kMute, fontSize: 15)),
               const SizedBox(height: 22),
