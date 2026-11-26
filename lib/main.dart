@@ -315,6 +315,24 @@ String orderName(Json o) {
 
 String orderBadge(Json o) => isParcel(o) ? 'P' : 'T${o['table']}';
 
+/// Admin kam (delete) mate Cloudflare Worker ne call kare. Login token sathe, Worker check kare ke tame admin cho.
+Future<Json> adminCall(String path, Json body) async {
+  if (kPayBase.startsWith('PASTE')) throw 'Worker link set nathi (lib/pay_config.dart)';
+  final tok = await FirebaseAuth.instance.currentUser?.getIdToken(true);
+  final r = await http
+      .post(Uri.parse('$kPayBase$path'),
+          headers: {'Authorization': 'Bearer $tok', 'Content-Type': 'application/json'}, body: jsonEncode(body))
+      .timeout(const Duration(seconds: 40));
+  Json j;
+  try {
+    j = jsonDecode(r.body) as Json;
+  } catch (_) {
+    j = {'error': 'Server error ${r.statusCode}'};
+  }
+  if (r.statusCode != 200) throw '${j['error'] ?? 'Error ${r.statusCode}'}';
+  return j;
+}
+
 class AppUpdate {
   final int latest, current;
   final String url;
@@ -1342,6 +1360,77 @@ class _RechargePageState extends State<RechargePage> {
   }
 }
 
+// ---------------- ADMIN: USERS ----------------
+class UsersPage extends StatelessWidget {
+  final String rid, shop, ownerEmail;
+  const UsersPage({required this.rid, required this.shop, required this.ownerEmail, super.key});
+
+  Future<void> deleteUser(BuildContext context, QDoc d) async {
+    final yes = await confirm(context, '${d.data()['name'] ?? 'User'} ne delete karvo? Tenu login pan jati rehse.', yes: 'Delete');
+    if (!yes || !context.mounted) return;
+    try {
+      await adminCall('/admin/delete-user', {'uid': d.id});
+      if (context.mounted) toast(context, 'User delete thayo');
+    } catch (e) {
+      if (context.mounted) toast(context, '$e', err: true);
+    }
+  }
+
+  String roleLabel(String r) => {'owner': 'Owner', 'waiter': 'Order lenar', 'cashier': 'Bill counter'}[r] ?? r;
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: Text(shop.isEmpty ? 'Users' : 'Users  ·  $shop')),
+        body: StreamBuilder<QuerySnapshot<Json>>(
+          stream: db.collection('users').where('rid', isEqualTo: rid).snapshots(),
+          builder: (_, s) {
+            if (s.hasError) return Center(child: Padding(padding: const EdgeInsets.all(24), child: Text('Error: ${errText(s.error)}', textAlign: TextAlign.center)));
+            final List<QDoc> docs = [...(s.data?.docs ?? <QDoc>[])]
+              ..sort((a, b) => ('${a.data()['role']}' == 'owner' ? 0 : 1).compareTo('${b.data()['role']}' == 'owner' ? 0 : 1));
+            return ListView(
+              physics: const BouncingScrollPhysics(),
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+              children: [
+                if (docs.isEmpty) empty(Icons.people_outline, 'Aa restaurant ma koi user nathi'),
+                for (final d in docs)
+                  Surface(
+                    margin: const EdgeInsets.only(bottom: 10),
+                    padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
+                    child: Row(children: [
+                      Expanded(
+                        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Text('${d.data()['name'] ?? ''}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+                          const SizedBox(height: 4),
+                          Wrap(spacing: 8, runSpacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: [
+                            pill(roleLabel('${d.data()['role']}')),
+                            Text(
+                                '${d.data()['role']}' == 'owner'
+                                    ? ownerEmail
+                                    : '${d.data()['email'] ?? ''}',
+                                style: const TextStyle(color: kMute, fontSize: 12.5)),
+                          ]),
+                        ]),
+                      ),
+                      if ('${d.data()['role']}' != 'owner')
+                        IconButton(
+                          onPressed: () => deleteUser(context, d),
+                          icon: const Icon(Icons.delete_outline, color: kBad),
+                        ),
+                    ]),
+                  ),
+                if (docs.any((d) => '${d.data()['role']}' == 'owner'))
+                  const Padding(
+                    padding: EdgeInsets.only(top: 6),
+                    child: Text('Owner ne alag delete nathi thatu. Owner sathe badhu delete karva "Badhu delete" vapro.',
+                        style: TextStyle(color: kMute, fontSize: 12.5, height: 1.4)),
+                  ),
+              ],
+            );
+          },
+        ),
+      );
+}
+
 // ---------------- ADMIN: PLANS ----------------
 class PlansPage extends StatelessWidget {
   const PlansPage({super.key});
@@ -1555,6 +1644,54 @@ class _AdminPageState extends State<AdminPage> {
     await run(context, () => d.reference.update({'status': st}));
   }
 
+  /// Restaurant no badho data + tena badha users (login sathe) delete kare. Pehla naam lakhine confirm karvu padse.
+  Future<void> deleteAll(QDoc d) async {
+    final name = '${d.data()['name'] ?? ''}';
+    final v = await askForm(context, 'Badhu delete karo?', ['Confirm mate restaurant nu naam lakho: $name']);
+    if (v == null || !mounted) return;
+    if (v[0].trim().toLowerCase() != name.trim().toLowerCase()) {
+      toast(context, 'Naam match na thayu, delete nathi thayu', err: true);
+      return;
+    }
+    final msg = ValueNotifier<String>('Delete thai rahyu che...');
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          backgroundColor: Colors.white,
+          surfaceTintColor: Colors.transparent,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          content: Row(children: [
+            const SizedBox(width: 26, height: 26, child: CircularProgressIndicator(strokeWidth: 3, color: kBrand)),
+            const SizedBox(width: 16),
+            Expanded(child: ValueListenableBuilder<String>(valueListenable: msg, builder: (_, t, __) => Text(t))),
+          ]),
+        ),
+      ),
+    );
+    String? err;
+    var total = 0;
+    try {
+      for (var i = 0; i < 400; i++) {
+        final j = await adminCall('/admin/delete-restaurant', {'rid': d.id});
+        total += (j['deleted'] as num?)?.toInt() ?? 0;
+        msg.value = 'Delete thai rahyu che...  ($total records)';
+        if (j['done'] == true) break;
+      }
+    } catch (e) {
+      err = '$e';
+    }
+    if (mounted) Navigator.pop(context);
+    if (!mounted) return;
+    if (err != null) {
+      toast(context, 'Delete adhuru rahyu: $err', err: true);
+    } else {
+      toast(context, '$name no badho data ane users delete thaya');
+    }
+  }
+
   bool planOk(Json o) {
     final e = effectiveEnd(o);
     return e != null && e.isAfter(DateTime.now());
@@ -1696,6 +1833,22 @@ class _AdminPageState extends State<AdminPage> {
                           ],
                           if (keys[tab] == 'rejected') btn('Fari chalu karo', () => setStatus(d, 'approved')),
                         ]),
+                        const SizedBox(height: 10),
+                        Row(children: [
+                          btn(
+                              'Users',
+                              () => Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                      builder: (_) => UsersPage(
+                                          rid: d.id,
+                                          shop: '${d.data()['name'] ?? ''}',
+                                          ownerEmail: '${d.data()['ownerEmail'] ?? ''}'))),
+                              color: kInk,
+                              outline: true),
+                          const SizedBox(width: 10),
+                          btn('Badhu delete', () => deleteAll(d), color: kBad, outline: true),
+                        ]),
                       ]),
                     ),
                 ]);
@@ -1797,7 +1950,7 @@ class _AuthPageState extends State<AuthPage> {
             });
             await db.collection('codes').doc(wc).set({'rid': rid, 'role': 'waiter'});
             await db.collection('codes').doc(cc).set({'rid': rid, 'role': 'cashier'});
-            await db.collection('users').doc(uid).set({'rid': rid, 'role': 'owner', 'name': nm.text.trim()});
+            await db.collection('users').doc(uid).set({'rid': rid, 'role': 'owner', 'name': nm.text.trim(), 'email': email});
           } else {
             final code = cd.text.trim().toUpperCase();
             final c = await db.collection('codes').doc(code).get();
@@ -1807,6 +1960,7 @@ class _AuthPageState extends State<AuthPage> {
               'role': c['role'],
               'code': code,
               'name': nm.text.trim(),
+              'email': email,
             });
           }
           try {
