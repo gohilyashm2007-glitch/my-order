@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'dart:io';
 import 'dart:ui' as ui;
 import 'dart:math';
+import 'package:audioplayers/audioplayers.dart' show AudioPlayer, AudioContext, AudioContextAndroid, AndroidAudioFocus, BytesSource;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -15,6 +16,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -76,6 +78,7 @@ Future<void> main() async {
             storageBucket: 'restaurant-manager-c2368.firebasestorage.app',
           ),
   );
+  await Fx.load();
   runApp(const MyOrderApp());
 }
 
@@ -136,7 +139,151 @@ String billText(String shop, Json o) {
   return b.toString();
 }
 
+/// Halku sound + vibration. Settings ma user pote chalu/band ane volume/strength set kari shake.
+class Fx {
+  static bool sound = true, vib = true, newOrder = true;
+  static double volume = 0.7;
+  static int level = 1; // 0 = Halku, 1 = Madhyam, 2 = Jordar
+  static SharedPreferences? _p;
+  static AudioPlayer? _pl;
+  static final Map<String, Uint8List> _cache = {};
+
+  static Future<void> load() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      _p = p;
+      sound = p.getBool('fx_sound') ?? true;
+      vib = p.getBool('fx_vib') ?? true;
+      newOrder = p.getBool('fx_new') ?? true;
+      volume = (p.getDouble('fx_vol') ?? 0.7).clamp(0.0, 1.0).toDouble();
+      level = (p.getInt('fx_level') ?? 1).clamp(0, 2).toInt();
+    } catch (_) {}
+  }
+
+  static void save() {
+    final p = _p;
+    if (p == null) return;
+    p.setBool('fx_sound', sound);
+    p.setBool('fx_vib', vib);
+    p.setBool('fx_new', newOrder);
+    p.setDouble('fx_vol', volume);
+    p.setInt('fx_level', level);
+  }
+
+  // Sine beep banave (WAV, memory ma). notes = [[frequency Hz, milliseconds], ...] (0 Hz = shanti)
+  static Uint8List _wav(List<List<num>> notes) {
+    const rate = 22050;
+    final samples = <int>[];
+    for (final n in notes) {
+      final f = n[0].toDouble();
+      final cnt = (rate * n[1] / 1000).round();
+      for (var i = 0; i < cnt; i++) {
+        final env = min(1.0, min(i / (rate * 0.004), (cnt - i) / (rate * 0.012)));
+        final v = f <= 0 ? 0.0 : sin(2 * pi * f * i / rate) * env * 0.6;
+        samples.add((v * 32767).round());
+      }
+    }
+    final data = ByteData(44 + samples.length * 2);
+    void w(int o, String x) {
+      for (var i = 0; i < x.length; i++) {
+        data.setUint8(o + i, x.codeUnitAt(i));
+      }
+    }
+
+    w(0, 'RIFF');
+    data.setUint32(4, 36 + samples.length * 2, Endian.little);
+    w(8, 'WAVE');
+    w(12, 'fmt ');
+    data.setUint32(16, 16, Endian.little);
+    data.setUint16(20, 1, Endian.little);
+    data.setUint16(22, 1, Endian.little);
+    data.setUint32(24, rate, Endian.little);
+    data.setUint32(28, rate * 2, Endian.little);
+    data.setUint16(32, 2, Endian.little);
+    data.setUint16(34, 16, Endian.little);
+    w(36, 'data');
+    data.setUint32(40, samples.length * 2, Endian.little);
+    for (var i = 0; i < samples.length; i++) {
+      data.setInt16(44 + i * 2, samples[i], Endian.little);
+    }
+    return data.buffer.asUint8List();
+  }
+
+  static Future<void> _play(String key, List<List<num>> notes) async {
+    if (!sound || volume <= 0) return;
+    try {
+      var pl = _pl;
+      if (pl == null) {
+        pl = AudioPlayer();
+        _pl = pl;
+        // Phone nu bijo music pause na thay te mate audio focus na leva
+        await pl.setAudioContext(AudioContext(android: const AudioContextAndroid(audioFocus: AndroidAudioFocus.none)));
+      }
+      final b = _cache.putIfAbsent(key, () => _wav(notes));
+      await pl.stop();
+      await pl.play(BytesSource(b), volume: volume);
+    } catch (_) {}
+  }
+
+  // e: 0 = halko tick, 1 = normal, 2 = majboot. User ni "strength" sathe bhaleli (selection / light / medium / heavy)
+  static Future<void> _hap(int e) async {
+    if (!vib) return;
+    try {
+      final eff = (e + level - 1).clamp(0, 3).toInt();
+      switch (eff) {
+        case 0:
+          await HapticFeedback.selectionClick();
+          break;
+        case 1:
+          await HapticFeedback.lightImpact();
+          break;
+        case 2:
+          await HapticFeedback.mediumImpact();
+          break;
+        default:
+          await HapticFeedback.heavyImpact();
+      }
+    } catch (_) {}
+  }
+
+  static void tick() {
+    _play('tick', [[1400, 22]]);
+    _hap(0);
+  }
+
+  static void ok() {
+    _play('ok', [[660, 70], [880, 110]]);
+    _hap(1);
+  }
+
+  static void paid() {
+    _play('paid', [[784, 80], [988, 80], [1319, 160]]);
+    _hap(2);
+  }
+
+  static void del() {
+    _play('del', [[500, 60]]);
+    _hap(1);
+  }
+
+  static void err() {
+    _play('err', [[300, 90], [0, 40], [300, 120]]);
+    _hap(2);
+  }
+
+  static Future<void> alert() async {
+    if (!newOrder) return;
+    _play('alert', [[880, 120], [0, 60], [880, 120], [0, 60], [1175, 200]]);
+    _hap(2);
+    await Future.delayed(const Duration(milliseconds: 200));
+    _hap(2);
+  }
+
+  static void previewHaptic() => _hap(1);
+}
+
 void toast(BuildContext c, String m, {bool err = false, String? action, VoidCallback? onAction}) {
+  if (err) Fx.err();
   ScaffoldMessenger.of(c).showSnackBar(SnackBar(
     content: Text(m),
     behavior: SnackBarBehavior.floating,
@@ -2080,10 +2227,32 @@ class Home extends StatefulWidget {
 class _HomeState extends State<Home> {
   int i = 0;
   Timer? cleanTimer;
+  StreamSubscription<QuerySnapshot<Json>>? orderSub;
+  bool firstOrders = true;
+
+  /// Bija phone par navo ke badlayelo order aave to avaj + vibration (fakt Owner / Bill counter ne).
+  void onOrders(QuerySnapshot<Json> snap) {
+    if (firstOrders) {
+      firstOrders = false;
+      return;
+    }
+    if (snap.metadata.hasPendingWrites) return;
+    final me = FirebaseAuth.instance.currentUser?.uid;
+    for (final ch in snap.docChanges) {
+      if (ch.type == DocumentChangeType.removed) continue;
+      final d = ch.doc.data();
+      if (d == null || '${d['byUid'] ?? ''}' == me) continue;
+      Fx.alert();
+      break;
+    }
+  }
 
   @override
   void initState() {
     super.initState();
+    if (widget.c.role != 'waiter') {
+      orderSub = widget.c.col('orders').where('status', isEqualTo: 'open').snapshots().listen(onOrders, onError: (_) {});
+    }
     cleanup();
     cleanTimer = Timer.periodic(const Duration(minutes: 3), (_) => cleanup());
     WidgetsBinding.instance.addPostFrameCallback((_) => expiryPopup());
@@ -2138,6 +2307,7 @@ class _HomeState extends State<Home> {
   @override
   void dispose() {
     cleanTimer?.cancel();
+    orderSub?.cancel();
     super.dispose();
   }
 
@@ -2367,12 +2537,16 @@ class _OrderPageState extends State<OrderPage> {
               'status': 'open',
               'items': FieldValue.arrayUnion(adds),
               'by': c.uname,
+              'byUid': FirebaseAuth.instance.currentUser?.uid,
               'updated': FieldValue.serverTimestamp(),
             }, SetOptions(merge: true)),
         queued: 'Order save thayo (offline). Internet aave tyare sync thase');
     if (!mounted) return;
     setState(() => busy = false);
-    if (ok) Navigator.pop(context);
+    if (ok) {
+      Fx.ok();
+      Navigator.pop(context);
+    }
   }
 
   Widget chip(String label, String value) {
@@ -2495,8 +2669,14 @@ class _OrderPageState extends State<OrderPage> {
                               ),
                               Qty(
                                 v: qty[m.id] ?? 0,
-                                onAdd: () => setState(() => qty[m.id] = (qty[m.id] ?? 0) + 1),
-                                onSub: () => setState(() => qty[m.id] = max(0, (qty[m.id] ?? 0) - 1)),
+                                onAdd: () {
+                                  Fx.tick();
+                                  setState(() => qty[m.id] = (qty[m.id] ?? 0) + 1);
+                                },
+                                onSub: () {
+                                  Fx.tick();
+                                  setState(() => qty[m.id] = max(0, (qty[m.id] ?? 0) - 1));
+                                },
                               ),
                             ]),
                           ),
@@ -2546,6 +2726,7 @@ class BillsPage extends StatelessWidget {
     } else {
       await run(context, () => ref.update({'items': FieldValue.arrayRemove(rm)}));
     }
+    Fx.del();
   }
 
   Future<String?> pickPay(BuildContext context, num total) => showModalBottomSheet<String>(
@@ -2601,6 +2782,7 @@ class BillsPage extends StatelessWidget {
     batch.set(c.col('stats').doc(dayKey(DateTime.now())), statsData(o, mode), SetOptions(merge: true));
     final ok = await run(context, () => batch.commit(), queued: 'Bill close thayu (offline). Internet aave tyare sync thase');
     if (ok && context.mounted) {
+      Fx.paid();
       final paidO = <String, dynamic>{...o, 'pay': mode};
       toast(context, '${orderName(o)} nu bill ${rs(orderTotal(o))} ($mode) close thayu',
           action: 'Bill moklo', onAction: () {
@@ -3398,6 +3580,86 @@ class _ProfilePageState extends State<ProfilePage> {
   }
 }
 
+// ---------------- SOUND / VIBRATION SETTINGS ----------------
+class SoundCard extends StatefulWidget {
+  const SoundCard({super.key});
+  @override
+  State<SoundCard> createState() => _SoundCardState();
+}
+
+class _SoundCardState extends State<SoundCard> {
+  Widget head(IconData icon, String title, String sub, bool value, ValueChanged<bool> f) => Row(children: [
+        Icon(icon, color: kBrand),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(title, style: const TextStyle(fontWeight: FontWeight.w700)),
+            Text(sub, style: const TextStyle(color: kMute, fontSize: 12.5)),
+          ]),
+        ),
+        Switch(value: value, onChanged: f),
+      ]);
+
+  @override
+  Widget build(BuildContext context) => Surface(
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          head(Icons.volume_up_outlined, 'Sound', 'Order, bill ane button no halku avaj', Fx.sound, (v) {
+            setState(() => Fx.sound = v);
+            Fx.save();
+            if (v) Fx.ok();
+          }),
+          if (Fx.sound) ...[
+            const SizedBox(height: 4),
+            Row(children: [
+              const Icon(Icons.volume_mute, size: 20, color: kMute),
+              Expanded(
+                child: Slider(
+                  value: Fx.volume,
+                  min: 0.05,
+                  max: 1,
+                  divisions: 19,
+                  label: '${(Fx.volume * 100).round()}%',
+                  onChanged: (v) => setState(() => Fx.volume = v),
+                  onChangeEnd: (v) {
+                    Fx.save();
+                    Fx.ok();
+                  },
+                ),
+              ),
+              const Icon(Icons.volume_up, size: 20, color: kMute),
+            ]),
+            head(Icons.notifications_active_outlined, 'Navo order no avaj', 'Bija phone par order aave tyare (Owner / Bill counter)', Fx.newOrder, (v) {
+              setState(() => Fx.newOrder = v);
+              Fx.save();
+              if (v) Fx.alert();
+            }),
+          ],
+          const Divider(height: 28),
+          head(Icons.vibration, 'Vibration', 'Button, order ane bill par halku vibration', Fx.vib, (v) {
+            setState(() => Fx.vib = v);
+            Fx.save();
+            if (v) Fx.previewHaptic();
+          }),
+          if (Fx.vib) ...[
+            const SizedBox(height: 12),
+            Seg(
+              items: const ['Halku', 'Madhyam', 'Jordar'],
+              index: Fx.level,
+              onChanged: (i) {
+                setState(() => Fx.level = i);
+                Fx.save();
+                Fx.previewHaptic();
+              },
+            ),
+          ],
+          const SizedBox(height: 12),
+          const Text(
+              'Aa setting aa phone par j lagu thay chhe. Avaj mate phone ni media volume chalu hovi joie, ane vibration mate phone ma touch feedback / haptic chalu hovu joie.',
+              style: TextStyle(color: kMute, fontSize: 12, height: 1.4)),
+        ]),
+      );
+}
+
 // ---------------- SETTINGS ----------------
 class SettingsPage extends StatelessWidget {
   final Ctx c;
@@ -3493,6 +3755,8 @@ class SettingsPage extends StatelessWidget {
           ]),
         ),
       ],
+      sectionTitle('Sound ane vibration'),
+      const SoundCard(),
       sectionTitle('App'),
       const VersionCard(),
       const SizedBox(height: 18),
