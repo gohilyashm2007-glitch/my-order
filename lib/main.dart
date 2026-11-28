@@ -4,7 +4,7 @@ import 'dart:typed_data';
 import 'dart:io';
 import 'dart:ui' as ui;
 import 'dart:math';
-import 'package:audioplayers/audioplayers.dart' show AudioPlayer, AudioContext, AudioContextAndroid, AndroidAudioFocus, BytesSource;
+import 'package:audioplayers/audioplayers.dart' show AudioPlayer, AudioContext, AudioContextAndroid, AndroidAudioFocus, BytesSource, DeviceFileSource;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -209,20 +209,50 @@ class Fx {
     return data.buffer.asUint8List();
   }
 
-  static Future<void> _play(String key, List<List<num>> notes) async {
-    if (!sound || volume <= 0) return;
+  static String lastError = '';
+
+  static Future<bool> _play(String key, List<List<num>> notes) async {
+    if (!sound || volume <= 0) return false;
     try {
       var pl = _pl;
       if (pl == null) {
         pl = AudioPlayer();
         _pl = pl;
-        // Phone nu bijo music pause na thay te mate audio focus na leva
-        await pl.setAudioContext(AudioContext(android: const AudioContextAndroid(audioFocus: AndroidAudioFocus.none)));
+        try {
+          // Phone nu bijo music pause na thay te mate audio focus na leva
+          await pl.setAudioContext(AudioContext(android: const AudioContextAndroid(audioFocus: AndroidAudioFocus.none)));
+        } catch (_) {}
       }
       final b = _cache.putIfAbsent(key, () => _wav(notes));
       await pl.stop();
-      await pl.play(BytesSource(b), volume: volume);
-    } catch (_) {}
+      if (kIsWeb) {
+        await pl.play(BytesSource(b), volume: volume);
+      } else {
+        try {
+          // File thi vagadvu (Android par sauthi bharosapatra)
+          final f = File('${Directory.systemTemp.path}/fx_$key.wav');
+          if (!await f.exists() || await f.length() != b.length) await f.writeAsBytes(b, flush: true);
+          await pl.play(DeviceFileSource(f.path), volume: volume);
+        } catch (_) {
+          await pl.play(BytesSource(b), volume: volume);
+        }
+      }
+      lastError = '';
+      return true;
+    } catch (e) {
+      lastError = '$e';
+      return false;
+    }
+  }
+
+  /// Settings ma "Sound test": sachi sthiti ane error (jo hoy to) batave.
+  static Future<String> test() async {
+    if (!sound) return 'Sound band che. Upar Sound chalu karo.';
+    if (volume <= 0) return 'Volume ghanu ochhu che. Slider vadhao.';
+    final ok = await _play('paid', [[784, 80], [988, 80], [1319, 160]]);
+    _hap(2);
+    if (!ok) return 'Sound vagi nathi shakyo: ${lastError.isEmpty ? 'karan khabar nathi' : lastError}';
+    return 'Sound vagadyo (${(volume * 100).round()}%). Awaj na aave to phone ni media volume vadharo ane silent mode band karo.';
   }
 
   // e: 0 = halko tick, 1 = normal, 2 = majboot. User ni "strength" sathe bhaleli (selection / light / medium / heavy)
@@ -1304,8 +1334,8 @@ class _VerifyPageState extends State<VerifyPage> {
               const SizedBox(height: 22),
               const Text('Email verify karo', textAlign: TextAlign.center, style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
               const SizedBox(height: 8),
-              Text('$email par verification link moklyo che.\nEmail ma link par dabavo, pachi ahiya pachha aavo. Spam folder pan check karo.',
-                  textAlign: TextAlign.center, style: const TextStyle(color: kMute, height: 1.4)),
+              Text('$email par verification email moklyo che.\nEmail ma "My Order" naam thi, noreply@restaurant-manager-c2368.firebaseapp.com par thi aavse. Aa sachi (Google Firebase ni) email che. Ema aapel link par dabavo, pachi ahiya pachha aavo.\n\nInbox ma na dekhay to Spam folder juo ane "Not spam" kari ne link kholo.',
+                  textAlign: TextAlign.center, style: const TextStyle(color: kMute, height: 1.45)),
               if (msg != null)
                 Padding(padding: const EdgeInsets.only(top: 14), child: Text(msg!, textAlign: TextAlign.center, style: const TextStyle(color: kBrand, fontWeight: FontWeight.w600))),
               const SizedBox(height: 24),
@@ -3652,6 +3682,20 @@ class _SoundCardState extends State<SoundCard> {
               },
             ),
           ],
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            style: OutlinedButton.styleFrom(
+                minimumSize: const Size.fromHeight(46),
+                foregroundColor: kInk,
+                side: const BorderSide(color: kLine),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+            onPressed: () async {
+              final m = await Fx.test();
+              if (context.mounted) toast(context, m);
+            },
+            icon: const Icon(Icons.play_arrow_rounded, color: kBrand),
+            label: const Text('Sound test karo', style: TextStyle(fontWeight: FontWeight.w700)),
+          ),
           const SizedBox(height: 12),
           const Text(
               'Aa setting aa phone par j lagu thay chhe. Avaj mate phone ni media volume chalu hovi joie, ane vibration mate phone ma touch feedback / haptic chalu hovu joie.',
